@@ -1,0 +1,43 @@
+# Hisilicon Kirin 960 平台用户上下文配置
+
+# 硬件平台信息
+platform: Kirin 960
+vendor: Hisilicon
+soc_model: Kirin 960
+
+# 驱动信息
+driver_hint: dw_mci
+driver_name: dw_mci_hi3660
+subsystem: mmc
+
+# 已知入口
+known_entry: dw_mci_hi3660_probe
+
+# 功能特性
+feature: uhs_tuning
+operation: card_init
+
+# 描述信息
+description: |
+  海思 Kirin 960 平台（Hi3660 芯片）
+  使用 DesignWare MMC 控制器的海思定制版本
+  驱动文件：drivers/mmc/host/dw_mmc-hi3660.c
+
+  特点：
+  - 支持 UHS-I 高速卡
+  - 自定义 tuning 实现
+  - 特殊的时钟和电源管理
+
+# 已知路径提示
+known_path_hints:
+  - dw_mci_hi3660_probe
+  - dw_mci_probe
+  - mmc_add_host
+  - mmc_start_host
+
+# 排除信息
+exclude:
+  - sdhci
+  - mxs_mmc
+  - dw_mci_rockchip
+  - dw_mci_exynos

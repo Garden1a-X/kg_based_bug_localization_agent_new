@@ -1,0 +1,33 @@
+# RK3288 平台用户上下文配置
+# 用于辅助 LLM 进行更准确的入口点选择
+
+# 硬件平台信息
+platform: RK3288
+vendor: Rockchip
+soc_model: RK3288
+
+# 驱动信息
+driver_hint: dw_mci
+driver_name: dw_mci_rockchip
+subsystem: mmc
+
+# 已知入口（可选）
+known_entry: dw_mci_rockchip_probe
+
+# 描述信息
+description: |
+  Rockchip RK3288 平台
+  使用 DesignWare MMC 控制器的 Rockchip 定制版本
+  驱动文件：drivers/mmc/host/dw_mmc-rockchip.c
+
+  常见问题：
+  - eMMC/SD卡初始化失败
+  - tuning 执行失败
+  - 卡识别问题
+
+# 排除信息（明确不相关的驱动）
+exclude:
+  - sdhci
+  - mxs_mmc
+  - dw_mci_exynos
+  - dw_mci_hi3660

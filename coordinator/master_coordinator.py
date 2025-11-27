@@ -433,7 +433,8 @@ class MasterCoordinator:
         log_text: str,
         k: int = 5,
         error_line: int = None,
-        subgraph_override: Optional[str] = None
+        subgraph_override: Optional[str] = None,
+        user_context: Optional[Dict] = None
     ) -> Dict:
         """
         处理错误日志，返回Top-K条调用链
@@ -443,6 +444,7 @@ class MasterCoordinator:
             k: 返回路径数量上限
             error_line: 已废弃（保留用于兼容性，不再用于剪枝）
             subgraph_override: 手动指定子图（可选），如果提供则跳过自动选择
+            user_context: 用户提供的上下文信息（可选），用于辅助入口选择
 
         Returns:
             包含多条路径的分析结果
@@ -525,7 +527,8 @@ class MasterCoordinator:
         if 'mmc' in log_text.lower() or 'tuning' in log_text.lower():
             parsed_log = self.log_parser.parse_mmc_log(
                 log_text,
-                candidate_entries=candidate_entries
+                candidate_entries=candidate_entries,
+                user_context=user_context
             )
         else:
             parsed_log = self.log_parser.execute(log_text)
@@ -585,7 +588,8 @@ class MasterCoordinator:
         intermediate_funcs: list = None,
         k: int = 5,
         error_line: int = None,
-        subgraph_override: Optional[str] = None
+        subgraph_override: Optional[str] = None,
+        user_context: Optional[Dict] = None
     ) -> Dict:
         """
         使用指定的起点、终点和中间节点，返回Top-K条调用链
@@ -598,6 +602,7 @@ class MasterCoordinator:
             k: 返回路径数量上限
             error_line: 已废弃（保留用于兼容性，不再用于剪枝）
             subgraph_override: 手动指定子图（可选），如果提供则跳过自动选择
+            user_context: 用户提供的上下文信息（可选），保留用于接口一致性
 
         Returns:
             包含多条路径的分析结果

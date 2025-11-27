@@ -28,6 +28,27 @@ sys.path.insert(0, str(project_root))
 from coordinator.master_coordinator import MasterCoordinator
 from utils.logger import setup_logger
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+
+def load_user_context(context_file: str) -> Optional[dict]:
+    """从文件加载用户上下文"""
+    if not yaml:
+        print("警告: 需要安装 PyYAML 才能使用用户上下文功能")
+        print("请运行: pip install pyyaml")
+        return None
+
+    if not os.path.exists(context_file):
+        raise FileNotFoundError(f"用户上下文文件不存在: {context_file}")
+
+    with open(context_file, 'r', encoding='utf-8') as f:
+        context = yaml.safe_load(f)
+
+    return context
+
 
 def parse_args():
     """解析命令行参数"""
@@ -156,6 +177,10 @@ def parse_args():
         '--llm-base-url',
         default='http://10.12.208.86:8502',
         help='LLM服务地址（默认：http://10.12.208.86:8502）'
+    )
+    parser.add_argument(
+        '--user-context',
+        help='用户上下文文件路径（YAML格式，提供平台、驱动等额外信息）'
     )
 
     # 输出配置
@@ -311,6 +336,13 @@ def main():
         elif args.log_file:
             log_text = load_log_from_file(args.log_file)
 
+        # 加载用户上下文（可选）
+        user_context = None
+        if args.user_context:
+            user_context = load_user_context(args.user_context)
+            if user_context:
+                print(f"📌 用户上下文: {args.user_context}")
+
         print(f"📋 数据目录: {args.data_dir}")
         if log_text:
             print(f"📝 日志来源: {'命令行' if args.log else args.log_file}")
@@ -322,6 +354,8 @@ def main():
             print(f"📦 指定子图: {args.subgraph}")
         if args.enable_llm_detection:
             print(f"🤖 LLM检测: ✓ 启用")
+        if user_context:
+            print(f"🔍 用户上下文: ✓ 已提供")
         print()
 
         # 创建协调器
@@ -344,7 +378,8 @@ def main():
                     end_func=args.end_func,
                     intermediate_funcs=args.intermediate_funcs,
                     k=args.k,
-                    subgraph_override=args.subgraph
+                    subgraph_override=args.subgraph,
+                    user_context=user_context
                 )
             else:
                 # 自动推断模式
@@ -354,7 +389,8 @@ def main():
                 result = coordinator.process_top_k(
                     log_text,
                     k=args.k,
-                    subgraph_override=args.subgraph
+                    subgraph_override=args.subgraph,
+                    user_context=user_context
                 )
 
             # 保存结果
