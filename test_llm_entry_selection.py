@@ -229,6 +229,10 @@ def test_with_custom_log_and_context():
 
     # 调用 LLM
     print("\n🔍 调用 LLM 分析...")
+    print(f"DEBUG: user_context 参数值: {user_context}")
+    print(f"DEBUG: user_context 类型: {type(user_context)}")
+    print(f"DEBUG: user_context 是否为 None: {user_context is None}")
+
     result = llm_client.analyze_log(
         log_text=log_text,
         candidate_entries=candidate_entries,

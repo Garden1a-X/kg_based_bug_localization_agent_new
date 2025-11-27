@@ -264,6 +264,9 @@ class LLMClient:
 {json.dumps(user_context, indent=2, ensure_ascii=False)}
 请结合这些信息进行分析。
 """
+            logger.debug(f"用户上下文已添加到 prompt: {user_context}")
+        else:
+            logger.debug("未提供用户上下文")
 
         prompt = f"""你是一个Linux内核驱动错误分析专家。请分析以下错误日志并选择最合适的入口函数。
 
@@ -327,6 +330,13 @@ class LLMClient:
 
 **注意：如果无法确定入口，start_entity 可以设为候选列表中的某个作为建议，但 start_confidence 必须 < 0.6，need_more_info 必须为 true。**
 """
+
+        # DEBUG: 保存 prompt 用于调试
+        import os
+        if os.environ.get('LLM_DEBUG_PROMPT'):
+            with open('/tmp/llm_prompt_debug.txt', 'w', encoding='utf-8') as f:
+                f.write(prompt)
+            logger.info("已将 prompt 保存到 /tmp/llm_prompt_debug.txt")
 
         try:
             response = self.complete(
