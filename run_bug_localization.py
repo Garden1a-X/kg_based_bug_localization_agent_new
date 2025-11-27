@@ -52,10 +52,9 @@ def parse_args():
        --subgraph mmc \\
        --k 5
 
-3. 手动指定起止点（使用子图自动选择）：
+3. 手动指定起止点（使用子图自动选择，无需日志）：
    python run_bug_localization.py \\
        --data-dir /data/xuao/code_kg_search/linux_test/data \\
-       --log "mmc0: tuning execution failed: -1" \\
        --start-func dw_mci_pltfm_probe \\
        --end-func dw_mci_execute_tuning \\
        --intermediate-funcs mmc_attach_mmc mmc_execute_tuning \\
@@ -92,15 +91,15 @@ def parse_args():
         help='知识图谱数据目录路径（可以是父目录或特定子图目录）'
     )
 
-    # 日志输入（二选一）
-    log_group = parser.add_mutually_exclusive_group(required=True)
+    # 日志输入（二选一，手动模式下可选）
+    log_group = parser.add_mutually_exclusive_group(required=False)
     log_group.add_argument(
         '--log',
-        help='错误日志文本（直接输入）'
+        help='错误日志文本（自动推断模式必需，手动模式可选）'
     )
     log_group.add_argument(
         '--log-file',
-        help='错误日志文件路径'
+        help='错误日志文件路径（自动推断模式必需，手动模式可选）'
     )
 
     # 模式选择
@@ -296,14 +295,27 @@ def main():
     setup_logger()
 
     try:
-        # 加载日志
+        # 判断运行模式
+        is_manual_mode = args.start_func and args.end_func
+
+        # 验证参数
+        if not is_manual_mode and not args.log and not args.log_file:
+            print("❌ 错误: 自动推断模式必须提供日志（使用 --log 或 --log-file）")
+            print("提示: 如果要手动指定起止点，请使用 --start-func 和 --end-func 参数")
+            return 1
+
+        # 加载日志（手动模式下可选）
+        log_text = ""
         if args.log:
             log_text = args.log
-        else:
+        elif args.log_file:
             log_text = load_log_from_file(args.log_file)
 
         print(f"📋 数据目录: {args.data_dir}")
-        print(f"📝 日志来源: {'命令行' if args.log else args.log_file}")
+        if log_text:
+            print(f"📝 日志来源: {'命令行' if args.log else args.log_file}")
+        else:
+            print(f"📝 日志来源: 无（手动模式）")
         print(f"🔢 Top-K: {args.k}")
         print(f"🎯 子图选择: {'✓ 启用' if args.enable_subgraph_selection else '✗ 禁用'}")
         if args.subgraph:
@@ -317,7 +329,7 @@ def main():
 
         try:
             # 判断模式并执行
-            if args.start_func and args.end_func:
+            if is_manual_mode:
                 # 手动指定模式
                 print(f"🎯 模式: 手动指定起止点")
                 print(f"   起点: {args.start_func}")

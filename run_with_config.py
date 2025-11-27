@@ -191,24 +191,33 @@ def run_with_scenario(config: Dict[str, Any], scenario_name: str):
     # 打印配置摘要
     print_config_summary(config, scenario)
 
-    # 加载日志
-    log_file = scenario.get('log_file')
-    if not log_file:
-        raise ValueError(f"场景 {scenario_name} 未指定日志文件")
+    # 判断运行模式
+    mode = scenario.get('mode', 'auto')
+    is_manual_mode = mode == 'manual'
 
-    log_text = load_log_from_file(log_file)
-    print(f"📝 日志来源: {log_file}\n")
+    # 加载日志（手动模式下可选）
+    log_file = scenario.get('log_file')
+    log_text = ""
+
+    if log_file:
+        log_text = load_log_from_file(log_file)
+        print(f"📝 日志来源: {log_file}\n")
+    elif not is_manual_mode:
+        # 自动模式必须提供日志
+        raise ValueError(f"场景 {scenario_name} 是自动推断模式，必须指定 log_file")
+    else:
+        # 手动模式，日志可选
+        print(f"📝 日志来源: 无（手动模式）\n")
 
     # 创建协调器
     coordinator = create_coordinator(config)
 
     try:
         # 根据模式执行
-        mode = scenario.get('mode', 'auto')
         k = config.get('top_k', 5)
         manual_subgraph = config.get('subgraph_selection', {}).get('manual_subgraph')
 
-        if mode == 'manual':
+        if is_manual_mode:
             # 手动指定模式
             result = coordinator.process_top_k_with_specific_functions(
                 log_text,
