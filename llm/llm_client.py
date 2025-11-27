@@ -279,11 +279,12 @@ class LLMClient:
 {log_text}
 
 ## 分析任务
-1. 识别错误类型和错误码
+**你只需要推断调用链的起点函数（入口函数），不需要推断终点或中间函数。**
+
+1. 识别错误类型和错误码（如果有）
 2. 判断这是初始化错误还是运行时错误
 3. **仔细检查日志中是否有明确的驱动类型线索**（如驱动名、特定函数名等）
-4. 找出错误点函数（实际报错的位置）
-5. 列出可能涉及的中间函数
+4. **根据候选列表和用户上下文，选择最合适的起点函数**
 
 ## 入口选择和置信度评估（非常重要！）
 
@@ -312,10 +313,10 @@ class LLMClient:
 - **0.0-0.4**: 无用户上下文，无法从日志判断
 
 **示例（重要！）：**
-- 日志："mmc0: tuning failed" + 用户上下文 {platform: "RK3288", driver_hint: "dw_mci", known_entry: "dw_mci_rockchip_probe"}
+- 日志："mmc0: tuning failed" + 用户上下文 {{platform: "RK3288", driver_hint: "dw_mci", known_entry: "dw_mci_rockchip_probe"}}
   → confidence=**0.8**，start_entity="dw_mci_rockchip_probe"，need_more_info=false
   → 理由：用户明确提供了平台、驱动和入口信息，应该信任用户提供的信息
-- 日志："mmc0: tuning failed" + 用户上下文 {platform: "RK3288", driver_hint: "dw_mci"}
+- 日志："mmc0: tuning failed" + 用户上下文 {{platform: "RK3288", driver_hint: "dw_mci"}}
   → confidence=**0.7**，start_entity="dw_mci_rockchip_probe"（从候选中选择匹配的），need_more_info=false
 - 日志："mmc0: tuning failed" + 无用户上下文 + 多个候选
   → confidence=0.3，start_entity=null，need_more_info=true
@@ -323,24 +324,26 @@ class LLMClient:
   → confidence=0.9
 
 ## 输出格式
-返回JSON格式（不要其他说明）：
+返回JSON格式（不要其他说明），**只需要返回起点相关信息**：
 {{
-  "error_type": "错误类型描述",
-  "error_code": 错误码（数字）,
+  "error_type": "错误类型描述（如有）",
+  "error_code": 错误码（数字，如果日志中有的话，否则为 null）,
   "start_entity": "起点函数名或null",
-  "start_confidence": 0.3,
-  "end_entity": "错误点函数名",
-  "intermediate_entities": ["中间函数1", "中间函数2"],
+  "start_confidence": 0.7,
   "reasoning": [
-    "推理步骤1：检查日志是否明确提到驱动名 - 未提到",
-    "推理步骤2：检查是否有特有函数 - 没有",
-    "推理步骤3：结论 - 无法确定具体驱动，confidence=0.3"
+    "推理步骤1：检查用户上下文 - 用户提供了 platform: RK3288, driver_hint: dw_mci",
+    "推理步骤2：检查候选列表 - 包含 dw_mci_rockchip_probe",
+    "推理步骤3：结论 - 用户上下文可靠，选择 dw_mci_rockchip_probe，confidence=0.7"
   ],
-  "need_more_info": true,
-  "suggestions": ["硬件平台信息（如 RK3288）", "驱动类型（如 dw_mci, sdhci）"]
+  "need_more_info": false,
+  "suggestions": []
 }}
 
-**注意：如果无法确定入口，start_entity 可以设为候选列表中的某个作为建议，但 start_confidence 必须 < 0.6，need_more_info 必须为 true。**
+**重要说明：**
+- **不要尝试推断 end_entity 或 intermediate_entities**，这些信息会从日志中提取
+- 如果用户提供了 known_entry，优先使用该值作为 start_entity
+- 如果无法确定入口，start_entity 设为 null，start_confidence < 0.6，need_more_info=true
+- suggestions 只在 need_more_info=true 时才需要提供
 """
 
         # DEBUG: 保存 prompt 用于调试
