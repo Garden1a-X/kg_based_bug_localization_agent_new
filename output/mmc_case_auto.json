@@ -1,0 +1,24 @@
+{
+  "success": false,
+  "parsed_log": {
+    "raw_log": "\nmmc0: tuning execution failed: -1\nmmc0: error -1 whilst initialising MMC card\n    ",
+    "error_messages": [
+      "-1 whilst initialising MMC card",
+      "mmc0: error -1 whilst initialising MMC card",
+      "-1"
+    ],
+    "error_codes": [
+      -1,
+      -1
+    ],
+    "functions": [],
+    "files": [],
+    "lines": []
+  },
+  "entities": {
+    "start_entity": null,
+    "end_entity": null,
+    "intermediate_entities": []
+  },
+  "error": "无法定位起点或终点"
+}

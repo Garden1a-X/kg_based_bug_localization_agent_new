@@ -1,0 +1,91 @@
+# Bug定位分析配置文件示例
+# 复制此文件为 bug_localization_config.yaml 并根据需要修改
+
+# 知识图谱数据目录
+# 可以是父目录（用于子图自动选择）或特定子图目录（传统方式）
+data_dir: "/data/xuao/code_kg_search/linux_test/data"
+
+# Top-K路径搜索配置
+top_k: 5  # 返回最多5条路径
+
+# 子图自动选择
+subgraph_selection:
+  enabled: true  # 是否启用子图自动选择
+  manual_subgraph: null  # 手动指定子图（如：mmc, usb, net），null表示自动选择
+
+# LLM配置
+llm:
+  # 间接调用检测（运行时分析delayed work等间接调用）
+  detection:
+    enabled: true
+
+  # 日志分析（使用LLM分析日志内容）
+  log_analysis:
+    enabled: false
+
+  # LLM后端配置（支持多种后端）
+  # 后端类型: 'openai'（OpenAI-compatible API）或 'ollama'（本地Ollama）
+  backend: "openai"
+
+  # ========== OpenAI-compatible 配置 ==========
+  # 适用于：原始OpenAI API、vLLM、华为内部OpenAI-compatible服务等
+  model: "gpt-4o-mini"
+  base_url: "http://10.12.208.86:8502"
+  api_key: ""  # 留空使用默认值
+
+  # ========== 华为内部OpenAI-compatible配置示例 ==========
+  # 取消注释以下配置以使用华为内部模型：
+  # backend: "openai"
+  # base_url: "http://openai.md.huawei.com/"
+  # api_key: "your_huawei_api_key"  # 从华为内部获取
+  # model: "DS-V3-0324"  # 可选: DS-V3-0324, DS-R1-05xx, gpt-oss-120b, qwen3-coder-480b
+
+  # ========== Ollama本地部署配置示例 ==========
+  # 取消注释以下配置以使用Ollama：
+  # backend: "ollama"
+  # host: "http://10.78.108.45:11434"
+  # model: "qwen3:4b-instruct-2507-fp16"
+  # timeout: 180  # 可选，超时时间（秒）
+
+# 输出配置
+output:
+  directory: "output"  # 输出目录
+  filename: "result.json"  # 输出文件名
+  save_intermediate: false  # 是否保存中间结果
+
+# 日志配置
+logging:
+  verbose: false  # 是否显示详细日志
+  log_file: null  # 日志文件路径，null表示不保存日志文件
+
+# 预设场景配置
+scenarios:
+  # MMC场景：自动推断模式
+  mmc_auto:
+    description: "MMC错误自动推断起止点"
+    log_file: "examples/logs/mmc_error.log"
+    mode: "auto"  # auto或manual
+
+  # MMC场景：手动指定模式
+  mmc_manual:
+    description: "MMC错误手动指定起止点"
+    log_file: "examples/logs/mmc_error.log"
+    mode: "manual"
+    start_func: "dw_mci_pltfm_probe"
+    end_func: "dw_mci_execute_tuning"
+    intermediate_funcs:
+      - "mmc_attach_mmc"
+      - "mmc_execute_tuning"
+      - "dw_mci_hi3660_execute_tuning"
+
+  # USB场景
+  usb_auto:
+    description: "USB错误自动推断"
+    log_file: "examples/logs/usb_error.log"
+    mode: "auto"
+
+  # 网络场景
+  net_auto:
+    description: "网络错误自动推断"
+    log_file: "examples/logs/net_error.log"
+    mode: "auto"

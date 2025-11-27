@@ -1,0 +1,47 @@
+# 需要LLM检测间接调用的函数配置
+#
+# 这些函数会在BFS搜索前进行预处理：
+# 1. LLM分析函数源码，提取间接调用的字段名
+# 2. 在图谱ASSIGNED_TO关系中查询该字段，找到候选函数
+# 3. 缓存结果，供BFS搜索使用
+
+# ========== 函数指针检测 ==========
+functions_need_llm_detection:
+  - mmc_execute_tuning      # 调用 host->ops->execute_tuning
+  - dw_mci_execute_tuning   # 调用 drv_data->execute_tuning
+
+  # 未来可以添加更多函数
+  # - dw_mci_init_slot
+  # - other_function
+
+# ========== 异步调用检测 ==========
+async_call_detection:
+  # 异步函数识别关键字
+  # 函数名包含这些关键字会被识别为异步调度函数
+  keywords:
+    - schedule
+    - delayed_work
+    - queue_work
+    - schedule_work
+    - init_work
+    - tasklet              # tasklet机制（初始化和调度）
+    - queue_work_on        # 指定CPU的工作队列调度
+    - queue_work_affinity  # CPU亲和性工作队列调度
+    - INIT_WORK            # 工作队列初始化宏
+    - INIT_DELAYED_WORK    # 延迟工作队列初始化宏
+
+  # 可选：显式列出已知异步函数
+  # 即使不匹配关键字，这些函数也会被识别为异步函数
+  known_async_functions:
+    # workqueue方式
+    - mmc_schedule_delayed_work
+    - queue_delayed_work
+    - schedule_delayed_work
+    - schedule_work
+    - queue_work
+    - queue_work_on
+    - queue_work_affinity
+
+    # tasklet方式
+    - tasklet_init
+    - tasklet_schedule

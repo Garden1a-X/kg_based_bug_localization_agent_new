@@ -1,0 +1,16 @@
+# 核心依赖
+openai>=1.0.0             # OpenAI API客户端（用于LLM推理）
+anthropic>=0.18.0         # Claude API客户端（备用）
+python-dotenv>=1.0.0      # 环境变量管理
+
+# 数据验证和配置
+pydantic>=2.0.0           # 数据验证
+pydantic-settings>=2.0.0  # 设置管理
+
+# 日志和输出美化
+rich>=13.0.0              # 终端美化输出
+loguru>=0.7.0             # 日志
+
+# 测试
+pytest>=7.0.0             # 测试框架
+pytest-cov>=4.0.0         # 测试覆盖率
