@@ -11,6 +11,7 @@ from agents.chain_tracer_agent import CallChainTracerAgent
 from llm import LLMClient
 from utils.subgraph_selector import SubgraphSelector
 from config.subgraph_metadata import SUBGRAPH_METADATA
+from config.entry_points import get_candidate_entries_for_subgraph, suggest_entry_by_platform
 from utils.logger import logger, print_header, print_step, print_success, print_error, print_panel
 from rich.console import Console
 from rich.table import Table
@@ -304,8 +305,19 @@ class MasterCoordinator:
         if key_functions and key_functions != functions:
             table.add_row("关键函数", ", ".join(key_functions))
 
-        if 'inferred_entry' in parsed:
-            table.add_row("推断入口", parsed['inferred_entry'])
+        # 显示推断入口和置信度
+        if 'inferred_entry' in parsed and parsed['inferred_entry']:
+            entry_display = parsed['inferred_entry']
+            confidence = parsed.get('entry_confidence', 0.0)
+            if confidence > 0:
+                confidence_str = f"{confidence:.1%}"
+                # 根据置信度使用不同颜色
+                if confidence >= 0.6:
+                    entry_display = f"{entry_display} [green](置信度: {confidence_str})[/green]"
+                else:
+                    entry_display = f"{entry_display} [yellow](置信度: {confidence_str}, 降级模式)[/yellow]"
+            table.add_row("推断入口", entry_display)
+
         if 'inferred_error_point' in parsed:
             table.add_row("推断错误点", parsed['inferred_error_point'])
 
@@ -501,11 +513,35 @@ class MasterCoordinator:
 
         # 第1步：日志解析
         print_step(1 + step_offset, total_steps, "解析错误日志")
+
+        # 获取候选入口函数（如果已选择子图）
+        candidate_entries = None
+        if selected_subgraph:
+            entry_config = get_candidate_entries_for_subgraph(selected_subgraph)
+            # 合并 ko_init 和 sdk_api
+            candidate_entries = entry_config.get('ko_init', []) + entry_config.get('sdk_api', [])
+            logger.info(f"为子图 '{selected_subgraph}' 加载了 {len(candidate_entries)} 个候选入口")
+
         if 'mmc' in log_text.lower() or 'tuning' in log_text.lower():
-            parsed_log = self.log_parser.parse_mmc_log(log_text)
+            parsed_log = self.log_parser.parse_mmc_log(
+                log_text,
+                candidate_entries=candidate_entries
+            )
         else:
             parsed_log = self.log_parser.execute(log_text)
+
         self._display_parsed_log(parsed_log)
+
+        # 检查是否需要更多信息（降级模式）
+        if parsed_log.get('need_more_info'):
+            console.print("\n[yellow]⚠️  需要更多信息才能确定完整调用链入口[/yellow]")
+            if parsed_log.get('fallback_mode'):
+                console.print(f"[dim]已启用降级模式：使用日志函数 '{parsed_log.get('inferred_entry')}' 作为起点[/dim]")
+            if parsed_log.get('suggestions'):
+                console.print("\n[cyan]💡 建议提供以下信息之一：[/cyan]")
+                for suggestion in parsed_log['suggestions'][:3]:
+                    console.print(f"   • {suggestion}")
+            console.print()
 
         # 第2步：实体定位
         print_step(2 + step_offset, total_steps, "在图谱中定位实体")

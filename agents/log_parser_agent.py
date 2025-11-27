@@ -179,16 +179,23 @@ class LogParserAgent(BaseAgent):
 
         return result
 
-    def parse_mmc_log(self, log_text: str) -> Dict:
+    def parse_mmc_log(
+        self,
+        log_text: str,
+        candidate_entries: list = None,
+        user_context: dict = None
+    ) -> Dict:
         """
         专门针对MMC日志的解析（甲方案例）
         使用基于FAIL_MESSAGE实体的匹配方法
 
         Args:
             log_text: MMC错误日志
+            candidate_entries: 候选入口函数列表（可选）
+            user_context: 用户提供的上下文信息（可选）
 
         Returns:
-            解析结果，包含推断的起点和终点
+            解析结果，包含推断的起点和终点、置信度等
         """
         self.log_start("解析MMC错误日志")
 
@@ -202,18 +209,20 @@ class LogParserAgent(BaseAgent):
         self.log_success(f"匹配到 {matched_count} 行日志")
         self.log_info(f"涉及函数: {all_functions}")
 
-        # 构建结果
+        # 构建基础结果
         result = {
             'raw_log': log_text,
             'line_matches': matching_result.get('line_matches', []),
             'functions': all_functions,  # 所有匹配到的函数
-            # 提取错误消息和错误码（使用原有的方法）
             'error_messages': self._extract_error_messages(log_text),
             'error_codes': self._extract_error_codes(log_text),
+            # 初始化入口相关字段（不设置默认值）
+            'inferred_entry': None,
+            'entry_confidence': 0.0,
+            'need_more_info': False,
+            'suggestions': [],
+            'llm_reasoning': []
         }
-
-        # Mock起始点（暂时固定为probe函数）
-        result['inferred_entry'] = 'dw_mci_pltfm_probe'
 
         # 推断错误点：取最底层的函数（日志的第一个匹配函数）
         if all_functions:
@@ -231,25 +240,76 @@ class LogParserAgent(BaseAgent):
             result['intermediate_functions'] = []
 
         # 如果启用了LLM，调用LLM进行增强分析
-        if self.enable_llm:
-            llm_result = self._analyze_with_llm(log_text, matching_result)
+        if self.enable_llm and self.llm_client:
+            llm_result = self._analyze_with_llm(
+                log_text,
+                matching_result,
+                candidate_entries=candidate_entries,
+                user_context=user_context
+            )
+
             if llm_result and not llm_result.get('error'):
-                # 使用LLM的结果覆盖推断
+                # 使用LLM的入口推断
+                if llm_result.get('start_entity'):
+                    result['inferred_entry'] = llm_result['start_entity']
+                    result['entry_confidence'] = llm_result.get('start_confidence', 0.5)
+
+                # 使用LLM的终点推断
                 if llm_result.get('end_entity'):
                     result['inferred_error_point'] = llm_result['end_entity']
+
+                # 中间节点
                 if llm_result.get('intermediate_entities'):
                     result['intermediate_functions'] = llm_result['intermediate_entities']
+
+                # 其他信息
+                result['need_more_info'] = llm_result.get('need_more_info', False)
+                result['suggestions'] = llm_result.get('suggestions', [])
+                result['llm_reasoning'] = llm_result.get('reasoning', [])
                 result['llm_analysis'] = llm_result
+
+        # 降级处理：如果LLM没有给出入口或置信度太低
+        if not result['inferred_entry'] or result['entry_confidence'] < 0.6:
+            # 使用日志中最上层的函数作为降级入口
+            if all_functions:
+                result['inferred_entry'] = all_functions[-1]  # 日志函数列表最后一个
+                result['entry_confidence'] = 0.3  # 标记为低置信度
+                result['need_more_info'] = True
+                result['fallback_mode'] = True  # 标记为降级模式
+
+                if not result['suggestions']:
+                    result['suggestions'] = [
+                        "硬件平台信息（如 RK3288, i.MX28, Renesas 等）",
+                        "驱动类型提示（如 dw_mci, mxs_mmc, sdhci 等）",
+                        "完整的 dmesg 日志（包含驱动加载信息）",
+                        "设备树信息或内核配置"
+                    ]
+
+                self.log_warning(f"⚠️ 无法确定完整入口，使用降级模式：{result['inferred_entry']} (日志最上层函数)")
+                self.log_info(f"💡 建议提供: {', '.join(result['suggestions'][:2])}")
+            else:
+                # 连日志函数都没有，无法分析
+                result['need_more_info'] = True
+                result['suggestions'] = ["无法从日志中提取函数信息，请提供更详细的错误日志"]
+                self.log_error("❌ 无法从日志中提取任何函数信息")
 
         return result
 
-    def _analyze_with_llm(self, log_text: str, matching_result: dict) -> dict:
+    def _analyze_with_llm(
+        self,
+        log_text: str,
+        matching_result: dict,
+        candidate_entries: list = None,
+        user_context: dict = None
+    ) -> dict:
         """
         使用LLM分析日志（可选）
 
         Args:
             log_text: 完整日志文本
             matching_result: 模式匹配结果
+            candidate_entries: 候选入口函数列表（可选）
+            user_context: 用户提供的上下文信息（可选）
 
         Returns:
             LLM分析结果
@@ -261,14 +321,26 @@ class LogParserAgent(BaseAgent):
 
         try:
             # 使用 llm_client 的 analyze_log 方法
-            llm_result = self.llm_client.analyze_log(log_text)
+            llm_result = self.llm_client.analyze_log(
+                log_text,
+                candidate_entries=candidate_entries,
+                user_context=user_context
+            )
 
             if not llm_result:
                 return {"error": "LLM返回空结果"}
 
-            # 如果LLM没有返回 intermediate_entities，添加空列表
+            # 如果LLM没有返回某些字段，添加默认值
             if 'intermediate_entities' not in llm_result:
                 llm_result['intermediate_entities'] = []
+            if 'start_confidence' not in llm_result:
+                llm_result['start_confidence'] = 0.5
+            if 'need_more_info' not in llm_result:
+                llm_result['need_more_info'] = False
+            if 'suggestions' not in llm_result:
+                llm_result['suggestions'] = []
+            if 'reasoning' not in llm_result:
+                llm_result['reasoning'] = []
 
             return llm_result
 

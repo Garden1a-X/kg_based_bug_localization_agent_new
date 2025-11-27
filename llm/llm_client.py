@@ -219,39 +219,83 @@ class LLMClient:
 
     def analyze_log(
         self,
-        log_text: str
+        log_text: str,
+        candidate_entries: list = None,
+        user_context: dict = None
     ) -> Optional[Dict[str, Any]]:
         """
         分析错误日志，提取结构化信息
 
         Args:
             log_text: 错误日志文本
+            candidate_entries: 候选入口函数列表（可选）
+            user_context: 用户提供的上下文信息（可选），如 {'platform': 'rk3288', 'driver': 'dw_mci'}
 
         Returns:
-            结构化的分析结果
+            结构化的分析结果，包含置信度
         """
         if not self.is_available():
             return None
 
-        prompt = f"""你是一个Linux内核驱动错误分析专家。请分析以下错误日志：
+        # 构建候选入口部分
+        candidates_section = ""
+        if candidate_entries:
+            candidates_section = f"""
+## 候选入口函数
+以下是可能的驱动入口函数（probe/init函数）：
+{json.dumps(candidate_entries, indent=2, ensure_ascii=False)}
+
+请从候选列表中选择最合适的入口函数。如果日志信息不足以确定具体是哪个驱动，请：
+- 设置 start_confidence < 0.6
+- 在 suggestions 中列出需要的额外信息
+"""
+        else:
+            candidates_section = """
+## 入口函数推断
+没有提供候选入口列表，请根据日志内容推断最可能的驱动入口函数（通常是 *_probe, *_init 等）。
+如果无法确定，设置 start_confidence < 0.6 并说明原因。
+"""
+
+        # 用户上下文
+        context_section = ""
+        if user_context:
+            context_section = f"""
+## 用户提供的额外信息
+{json.dumps(user_context, indent=2, ensure_ascii=False)}
+请结合这些信息进行分析。
+"""
+
+        prompt = f"""你是一个Linux内核驱动错误分析专家。请分析以下错误日志并选择最合适的入口函数。
+{candidates_section}
+{context_section}
 
 ## 错误日志
 {log_text}
 
 ## 分析任务
 1. 识别错误类型和错误码
-2. 找出调用链的起点函数（通常是驱动初始化、probe等）
-3. 找出错误点函数（实际报错的位置）
-4. 列出可能涉及的中间函数
+2. 判断这是初始化错误还是运行时错误
+3. 从候选列表中选择最可能的起点函数（如果有候选列表），或推断起点
+4. 找出错误点函数（实际报错的位置）
+5. 列出可能涉及的中间函数
+6. **评估起点选择的置信度**（0.0-1.0）：
+   - 0.8-1.0: 日志明确指出驱动类型或有充分证据
+   - 0.6-0.8: 有一定证据支持，但不完全确定
+   - 0.0-0.6: 信息不足，需要更多信息
+7. 如果置信度低，列出需要用户提供的额外信息
 
 ## 输出格式
 返回JSON格式（不要其他说明）：
 {{
   "error_type": "错误类型描述",
-  "error_code": 错误码（数字），
+  "error_code": 错误码（数字）,
   "start_entity": "起点函数名",
+  "start_confidence": 0.8,
   "end_entity": "错误点函数名",
-  "intermediate_entities": ["中间函数1", "中间函数2"]
+  "intermediate_entities": ["中间函数1", "中间函数2"],
+  "reasoning": ["推理步骤1：根据日志中的xxx判断...", "推理步骤2：..."],
+  "need_more_info": false,
+  "suggestions": ["如果need_more_info=true，列出需要的信息，如'硬件平台信息'"]
 }}
 """
 
