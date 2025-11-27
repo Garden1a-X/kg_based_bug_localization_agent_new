@@ -83,7 +83,7 @@ mmc0: error -1 whilst initialising MMC card
 
     # 解析日志
     console.print("\n[dim]正在调用 LLM 分析...[/dim]")
-    result = log_parser.parse_mmc_log(
+    result = log_parser.parse_log(
         test_log,
         candidate_entries=candidates
     )
@@ -149,7 +149,7 @@ mmc0: error -1 whilst initialising MMC card
     console.print(f"候选入口数量: {len(candidates)}")
 
     console.print("\n[dim]正在调用 LLM 分析...[/dim]")
-    result = log_parser.parse_mmc_log(
+    result = log_parser.parse_log(
         test_log,
         candidate_entries=candidates,
         user_context=user_context
@@ -172,7 +172,7 @@ mmc0: tuning execution failed: -1
 mmc0: error -1 whilst initialising MMC card
 """
 
-    result = log_parser.parse_mmc_log(test_log)
+    result = log_parser.parse_log(test_log)
 
     console.print(f"✓ 推断入口: [yellow]{result.get('inferred_entry')}[/yellow]")
     console.print(f"✓ 置信度: [yellow]{result.get('entry_confidence', 0):.1%}[/yellow]")

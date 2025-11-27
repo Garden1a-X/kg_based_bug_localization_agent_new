@@ -179,25 +179,25 @@ class LogParserAgent(BaseAgent):
 
         return result
 
-    def parse_mmc_log(
+    def parse_log(
         self,
         log_text: str,
         candidate_entries: list = None,
         user_context: dict = None
     ) -> Dict:
         """
-        专门针对MMC日志的解析（甲方案例）
-        使用基于FAIL_MESSAGE实体的匹配方法
+        解析错误日志（增强版）
+        使用基于FAIL_MESSAGE实体的匹配方法 + LLM入口选择
 
         Args:
-            log_text: MMC错误日志
+            log_text: 错误日志文本
             candidate_entries: 候选入口函数列表（可选）
             user_context: 用户提供的上下文信息（可选）
 
         Returns:
             解析结果，包含推断的起点和终点、置信度等
         """
-        self.log_start("解析MMC错误日志")
+        self.log_start("解析错误日志")
 
         # 使用新的基于FAIL_MESSAGE的匹配方法
         matching_result = self._analyze_log_by_lines(log_text)

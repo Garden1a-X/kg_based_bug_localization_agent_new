@@ -182,11 +182,8 @@ class MasterCoordinator:
 
         # 第1步：日志解析
         print_step(1 + step_offset, total_steps, "解析错误日志")
-        # 检测是否是 MMC 日志
-        if 'mmc' in log_text.lower() or 'tuning' in log_text.lower():
-            parsed_log = self.log_parser.parse_mmc_log(log_text)
-        else:
-            parsed_log = self.log_parser.execute(log_text)
+        # 使用增强的日志解析（支持 FAIL_MESSAGE 匹配）
+        parsed_log = self.log_parser.parse_log(log_text)
         self._display_parsed_log(parsed_log)
 
         # 第2步：实体定位
@@ -524,14 +521,12 @@ class MasterCoordinator:
             candidate_entries = entry_config.get('ko_init', []) + entry_config.get('sdk_api', [])
             logger.info(f"为子图 '{selected_subgraph}' 加载了 {len(candidate_entries)} 个候选入口")
 
-        if 'mmc' in log_text.lower() or 'tuning' in log_text.lower():
-            parsed_log = self.log_parser.parse_mmc_log(
-                log_text,
-                candidate_entries=candidate_entries,
-                user_context=user_context
-            )
-        else:
-            parsed_log = self.log_parser.execute(log_text)
+        # 使用增强的日志解析（支持 FAIL_MESSAGE 匹配 + LLM 入口选择）
+        parsed_log = self.log_parser.parse_log(
+            log_text,
+            candidate_entries=candidate_entries,
+            user_context=user_context
+        )
 
         self._display_parsed_log(parsed_log)
 
