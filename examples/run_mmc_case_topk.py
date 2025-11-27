@@ -14,8 +14,29 @@ from coordinator.master_coordinator import MasterCoordinator
 from utils.logger import setup_logger, print_header
 import json
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 # 配置日志
 setup_logger()
+
+
+def load_user_context(context_file: str) -> dict:
+    """加载用户上下文文件"""
+    if not yaml:
+        print("警告: 需要安装 PyYAML 才能使用用户上下文功能")
+        print("请运行: pip install pyyaml")
+        return None
+
+    if not os.path.exists(context_file):
+        raise FileNotFoundError(f"用户上下文文件不存在: {context_file}")
+
+    with open(context_file, 'r', encoding='utf-8') as f:
+        context = yaml.safe_load(f)
+
+    return context
 
 
 def run_mmc_case_topk():
@@ -295,7 +316,7 @@ mmc0: error -1 whilst initialising MMC card
         coordinator.close()
 
 
-def run_mmc_case_with_log_matching():
+def run_mmc_case_with_log_matching(user_context_file=None):
     """运行MMC案例 - 日志匹配 + 子图自动选择 + LLM入口选择 + Top-K路径搜索"""
 
     print_header("运行MMC案例 - 日志匹配 + 子图自动选择 + LLM入口选择")
@@ -313,6 +334,16 @@ mmc0: error -1 whilst initialising MMC card
     if not os.path.exists(data_dir):
         print(f"错误: 数据目录不存在 ({data_dir})")
         return
+
+    # 加载用户上下文（如果提供）
+    user_context = None
+    if user_context_file:
+        print(f"\n📌 加载用户上下文: {user_context_file}")
+        user_context = load_user_context(user_context_file)
+        if user_context:
+            print(f"   平台: {user_context.get('platform', 'N/A')}")
+            print(f"   驱动提示: {user_context.get('driver_hint', 'N/A')}")
+        print("")
 
     # LLM配置
     llm_config = {
@@ -335,7 +366,8 @@ mmc0: error -1 whilst initialising MMC card
         # 使用新的 process_top_k 方法（自动调用日志匹配）
         result = coordinator.process_top_k(
             mmc_error_log,
-            k=5
+            k=5,
+            user_context=user_context  # 传入用户上下文
         )
 
         # 保存结果
@@ -458,28 +490,51 @@ mmc0: error -1 whilst initialising MMC card
 
 def main():
     """主函数"""
-    if len(sys.argv) > 1:
-        if sys.argv[1] == '--direct':
-            # 直接测试KG接口
-            demo_topk_direct()
-        elif sys.argv[1] == '--llm':
-            # 测试LLM辅助检测 + 子图自动选择
-            run_mmc_case_with_llm()
-        elif sys.argv[1] == '--log-match':
-            # 测试日志匹配集成 + 子图自动选择
-            run_mmc_case_with_log_matching()
-        elif sys.argv[1] == '--traditional':
-            # 测试传统方式（不启用子图自动选择）
-            run_mmc_case_traditional()
+    import argparse
+
+    parser = argparse.ArgumentParser(description='MMC案例演示 - Top-K路径搜索')
+    parser.add_argument('--mode', choices=['standard', 'direct', 'llm', 'log-match', 'traditional'],
+                       default='standard',
+                       help='运行模式（默认：standard）')
+    parser.add_argument('--user-context',
+                       help='用户上下文文件路径（YAML格式，仅对 log-match 模式有效）')
+
+    # 如果没有参数，使用旧的行为（兼容性）
+    if len(sys.argv) == 1:
+        run_mmc_case_topk()
+        return
+
+    # 检查是否使用旧的命令行格式（--direct, --llm等）
+    if len(sys.argv) == 2 and sys.argv[1].startswith('--'):
+        mode_map = {
+            '--direct': 'direct',
+            '--llm': 'llm',
+            '--log-match': 'log-match',
+            '--traditional': 'traditional'
+        }
+        if sys.argv[1] in mode_map:
+            args = argparse.Namespace(mode=mode_map[sys.argv[1]], user_context=None)
         else:
-            print("用法:")
-            print("  python run_mmc_case_topk.py                # 标准模式（启用子图自动选择）")
-            print("  python run_mmc_case_topk.py --direct       # 直接测试KG接口")
-            print("  python run_mmc_case_topk.py --llm          # LLM辅助检测 + 子图自动选择")
-            print("  python run_mmc_case_topk.py --log-match    # 日志匹配 + 子图自动选择")
-            print("  python run_mmc_case_topk.py --traditional  # 传统方式（不启用子图选择）")
+            parser.print_help()
+            return
     else:
-        # 完整流程测试
+        args = parser.parse_args()
+
+    # 根据模式运行
+    if args.mode == 'direct':
+        # 直接测试KG接口
+        demo_topk_direct()
+    elif args.mode == 'llm':
+        # 测试LLM辅助检测 + 子图自动选择
+        run_mmc_case_with_llm()
+    elif args.mode == 'log-match':
+        # 测试日志匹配集成 + 子图自动选择
+        run_mmc_case_with_log_matching(user_context_file=args.user_context)
+    elif args.mode == 'traditional':
+        # 测试传统方式（不启用子图自动选择）
+        run_mmc_case_traditional()
+    else:
+        # 标准模式（启用子图自动选择）
         run_mmc_case_topk()
 
 
