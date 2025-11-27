@@ -19,7 +19,7 @@ setup_logger()
 
 
 def run_mmc_case_topk():
-    """运行MMC案例 - Top-K路径搜索（使用子图自动选择）"""
+    """运行MMC案例 - Top-K路径搜索（使用子图自动选择 + LLM入口选择）"""
 
     # 甲方提供的错误日志（3行简单日志）
     mmc_error_log = """
@@ -28,7 +28,7 @@ mmc0: tuning execution failed: -1
 mmc0: error -1 whilst initialising MMC card
     """
 
-    print_header("运行MMC案例 - Top-K路径搜索（子图自动选择）")
+    print_header("运行MMC案例 - Top-K路径搜索（子图自动选择 + LLM入口选择）")
 
     # 使用父目录（包含所有子图）
     data_dir = "/data/xuao/code_kg_search/linux_test/data"
@@ -37,11 +37,21 @@ mmc0: error -1 whilst initialising MMC card
         print(f"错误: 数据目录不存在 ({data_dir})")
         return
 
-    # 创建协调器（启用子图自动选择，不启用LLM）
+    # LLM配置
+    llm_config = {
+        'backend': 'openai',
+        'model': 'gpt-4o-mini',
+        'base_url': 'http://10.12.208.86:8502',
+        'api_key': ''
+    }
+
+    # 创建协调器（启用子图自动选择 + LLM日志分析）
     coordinator = MasterCoordinator(
         data_dir=data_dir,
         llm_client=None,
-        enable_subgraph_selection=True  # 启用子图自动选择
+        enable_llm_log_analysis=True,    # 启用LLM日志分析（含入口选择）
+        enable_subgraph_selection=True,  # 启用子图自动选择
+        llm_config=llm_config
     )
 
     try:
@@ -144,9 +154,9 @@ def demo_topk_direct():
 
 
 def run_mmc_case_with_llm():
-    """运行MMC案例 - 启用LLM间接调用检测 + 子图自动选择"""
+    """运行MMC案例 - 启用LLM间接调用检测 + 子图自动选择 + LLM入口选择"""
 
-    print_header("运行MMC案例 - LLM辅助间接调用检测 + 子图自动选择")
+    print_header("运行MMC案例 - LLM全功能模式（间接调用检测 + 子图选择 + 入口选择）")
 
     # 甲方提供的错误日志
     mmc_error_log = """
@@ -162,17 +172,28 @@ mmc0: error -1 whilst initialising MMC card
         print(f"错误: 数据目录不存在 ({data_dir})")
         return
 
-    print("\n创建协调器（启用LLM间接调用检测 + 子图自动选择）...")
-    print("  配置文件: config/indirect_call_detection.yaml")
-    print("  预处理模式: BFS前调用LLM分析配置的函数")
-    print("  子图选择: 基于日志内容自动选择相关子图\n")
+    print("\n创建协调器（LLM全功能模式）...")
+    print("  - LLM间接调用检测: 分析异步调用、函数指针等")
+    print("  - 子图自动选择: 基于日志内容选择相关子图")
+    print("  - LLM入口选择: 智能选择调用链起点，带置信度评估")
+    print("  配置文件: config/indirect_call_detection.yaml\n")
 
-    # 创建协调器，启用LLM检测和子图选择
+    # LLM配置
+    llm_config = {
+        'backend': 'openai',
+        'model': 'gpt-4o-mini',
+        'base_url': 'http://10.12.208.86:8502',
+        'api_key': ''
+    }
+
+    # 创建协调器，启用所有LLM功能
     coordinator = MasterCoordinator(
         data_dir=data_dir,
         llm_client=None,
-        enable_llm_detection=True,  # 启用LLM检测
-        enable_subgraph_selection=True  # 启用子图自动选择
+        enable_llm_detection=True,       # 启用LLM间接调用检测
+        enable_llm_log_analysis=True,    # 启用LLM日志分析（含入口选择）
+        enable_subgraph_selection=True,  # 启用子图自动选择
+        llm_config=llm_config
     )
 
     try:
@@ -275,9 +296,9 @@ mmc0: error -1 whilst initialising MMC card
 
 
 def run_mmc_case_with_log_matching():
-    """运行MMC案例 - 日志匹配 + 子图自动选择 + Top-K路径搜索"""
+    """运行MMC案例 - 日志匹配 + 子图自动选择 + LLM入口选择 + Top-K路径搜索"""
 
-    print_header("运行MMC案例 - 日志匹配 + 子图自动选择 + Top-K路径搜索")
+    print_header("运行MMC案例 - 日志匹配 + 子图自动选择 + LLM入口选择")
 
     # 甲方提供的错误日志
     mmc_error_log = """
@@ -293,12 +314,21 @@ mmc0: error -1 whilst initialising MMC card
         print(f"错误: 数据目录不存在 ({data_dir})")
         return
 
-    # 创建协调器（新的日志匹配方法已集成到 LogParserAgent + 子图自动选择）
+    # LLM配置
+    llm_config = {
+        'backend': 'openai',
+        'model': 'gpt-4o-mini',
+        'base_url': 'http://10.12.208.86:8502',
+        'api_key': ''
+    }
+
+    # 创建协调器（日志匹配 + LLM入口选择 + 子图自动选择）
     coordinator = MasterCoordinator(
         data_dir=data_dir,
         llm_client=None,
-        enable_llm_log_analysis=False,
-        enable_subgraph_selection=True  # 启用子图自动选择
+        enable_llm_log_analysis=True,    # 启用LLM日志分析（含入口选择）
+        enable_subgraph_selection=True,  # 启用子图自动选择
+        llm_config=llm_config
     )
 
     try:
@@ -340,10 +370,11 @@ mmc0: error -1 whilst initialising MMC card
         print("\n" + "=" * 60)
         print("流程说明:")
         print("=" * 60)
-        print("  1. 日志匹配：基于FAIL_MESSAGE实体的精确匹配")
-        print("  2. Mock起始点：暂时使用 dw_mci_pltfm_probe 作为入口")
-        print("  3. 路径搜索：在知识图谱中搜索最优调用路径")
-        print("  4. 排序策略：考虑路径长度、间接调用数量、调用行号")
+        print("  1. 子图选择：LLM基于日志内容选择相关子图（mmc）")
+        print("  2. 日志匹配：基于FAIL_MESSAGE实体的精确匹配")
+        print("  3. 入口选择：LLM从候选入口中智能选择，或降级到日志函数")
+        print("  4. 路径搜索：在知识图谱中搜索Top-K条最优调用路径")
+        print("  5. 排序策略：考虑路径长度、间接调用数量、调用行号、关键函数覆盖率")
 
     finally:
         coordinator.close()
