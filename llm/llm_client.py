@@ -287,28 +287,40 @@ class LLMClient:
 
 ## 入口选择和置信度评估（非常重要！）
 
-**只有满足以下条件之一时，才能给出 confidence >= 0.6：**
-1. ✅ 日志中明确提到了驱动名称（如 "dwmmc", "sdhci", "dw_mci" 等）
-2. ✅ 用户提供了明确的平台或驱动信息（在用户上下文中）
-3. ✅ 日志中包含该驱动的特有函数名（如 "dw_mci_execute_tuning" 明确指向 dw_mci 驱动）
+**置信度评估规则：**
 
-**以下情况必须给出 confidence < 0.6：**
-1. ❌ 日志仅提到通用的子系统名（如 "mmc", "usb"），没有具体驱动信息
-2. ❌ 候选列表中有多个驱动都可能匹配
-3. ❌ 只是基于猜测或经验，没有硬证据
-4. ❌ 日志信息过于简单，无法确定具体驱动
+**高置信度 (>= 0.6) - 满足以下任一条件即可：**
+1. ✅ **用户明确提供了平台和驱动信息**（如 platform: RK3288, driver_hint: dw_mci）
+   - **重要：用户提供的上下文是可靠证据，应该优先信任！**
+   - 即使日志中没有明确提到驱动名，用户上下文也足以作为判断依据
+   - 如果有 known_entry 字段，应优先使用该入口
+2. ✅ 日志中明确提到了驱动名称（如 "dw_mci", "sdhci"）
+3. ✅ 日志中包含该驱动的特有函数名（如 "dw_mci_execute_tuning"）
 
-**置信度标准（严格执行）：**
-- **0.8-1.0**: 有**明确的硬证据**（日志中的驱动名、用户明确指定、特有函数名）
-- **0.6-0.8**: 有**一定证据**（如日志中的特有函数可以推断出驱动类型）
-- **0.4-0.6**: 有**弱证据**（如基于子系统名猜测，但不确定）
-- **0.0-0.4**: **无法确定**（日志信息太少，无法判断）
+**中等置信度 (0.4-0.6)：**
+1. 有用户上下文，但信息不完整（如只有 platform 没有 driver_hint）
+2. 候选列表中有多个驱动都可能匹配，需要更多信息区分
 
-**示例：**
-- 日志："mmc0: tuning failed" + 候选:[dw_mci_probe, sdhci_probe] → confidence=0.3（无法确定是哪个驱动）
-- 日志："dw_mci: tuning failed" → confidence=0.9（明确提到 dw_mci）
-- 日志："mmc0: tuning failed" + 用户提供 platform="RK3288" → confidence=0.8（RK3288 用 dw_mci）
-- 日志中有函数 "dw_mci_execute_tuning" → confidence=0.8（特有函数名）
+**低置信度 (< 0.4) - 仅当以下情况：**
+1. ❌ 日志仅提到通用的子系统名（如 "mmc"），**且无用户上下文**
+2. ❌ 日志信息过于简单，**且无用户上下文**
+
+**置信度标准：**
+- **0.75-1.0**: 日志中明确驱动名 或 用户提供完整上下文（platform + driver_hint + known_entry）
+- **0.6-0.75**: 用户提供平台和驱动提示（platform + driver_hint）
+- **0.4-0.6**: 只有部分信息（仅 platform 或仅 driver_hint）
+- **0.0-0.4**: 无用户上下文，无法从日志判断
+
+**示例（重要！）：**
+- 日志："mmc0: tuning failed" + 用户上下文 {platform: "RK3288", driver_hint: "dw_mci", known_entry: "dw_mci_rockchip_probe"}
+  → confidence=**0.8**，start_entity="dw_mci_rockchip_probe"，need_more_info=false
+  → 理由：用户明确提供了平台、驱动和入口信息，应该信任用户提供的信息
+- 日志："mmc0: tuning failed" + 用户上下文 {platform: "RK3288", driver_hint: "dw_mci"}
+  → confidence=**0.7**，start_entity="dw_mci_rockchip_probe"（从候选中选择匹配的），need_more_info=false
+- 日志："mmc0: tuning failed" + 无用户上下文 + 多个候选
+  → confidence=0.3，start_entity=null，need_more_info=true
+- 日志："dw_mci: tuning failed"
+  → confidence=0.9
 
 ## 输出格式
 返回JSON格式（不要其他说明）：
