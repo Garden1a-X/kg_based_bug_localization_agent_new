@@ -312,14 +312,29 @@ class KnowledgeGraphInterface:
 
     def get_equivalent_ids(self, func_id):
         """
-        获取等价ID集合（包括声明和实现）
+        获取等价ID集合（包括所有同名函数的声明和实现）
 
         Args:
             func_id: 函数ID
 
         Returns:
-            等价ID集合
+            等价ID集合（包括所有同名的声明和实现）
         """
+        # 获取该函数的名称
+        entity = self.entity_by_id.get(func_id)
+        if not entity:
+            return {func_id}
+
+        func_name = entity.get('name')
+        if not func_name:
+            return {func_id}
+
+        # 返回所有同名函数的ID（包括所有声明和所有实现）
+        all_ids = self.func_name_to_ids.get(func_name, [])
+        if all_ids:
+            return set(all_ids)
+
+        # 如果func_name_to_ids中没有，回退到原来的逻辑
         equivalent = {func_id}
 
         # 如果是声明，添加对应的实现
