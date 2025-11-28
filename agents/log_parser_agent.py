@@ -180,23 +180,21 @@ class LogParserAgent(BaseAgent):
         fail_messages = {}
         if self.kg:
             try:
-                # 查询所有FAIL_MESSAGE实体
-                query = """
-                MATCH (msg:FAIL_MESSAGE)
-                RETURN msg.id as id, msg.name as name, msg.type as type,
-                       msg.scope as scope, msg.source_file as source_file,
-                       msg.start_line as start_line
-                """
-                results = self.kg.execute_query(query)
-                for r in results:
-                    fail_messages[r['id']] = {
-                        'id': r['id'],
-                        'name': r['name'],
-                        'type': r['type'],
-                        'scope': r['scope'],
-                        'source_file': r.get('source_file'),
-                        'start_line': r.get('start_line')
-                    }
+                # 从图谱中查询所有FAIL_MESSAGE实体
+                # 遍历 entity_by_id，过滤出 type='FAIL_MESSAGE' 的实体
+                for entity_id, entity in self.kg.entity_by_id.items():
+                    if entity.get('type') == 'FAIL_MESSAGE':
+                        fail_messages[entity_id] = {
+                            'id': entity.get('id'),
+                            'name': entity.get('name'),
+                            'type': entity.get('type'),
+                            'scope': entity.get('scope'),
+                            'source_file': entity.get('source_file'),
+                            'start_line': entity.get('start_line')
+                        }
+
+                if fail_messages:
+                    self.log_info(f"从图谱加载了 {len(fail_messages)} 个 FAIL_MESSAGE 实体")
             except Exception as e:
                 self.log_warning(f"从图谱查询FAIL_MESSAGE失败: {e}")
 
