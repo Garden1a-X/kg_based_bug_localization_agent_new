@@ -92,10 +92,11 @@ class MasterCoordinator:
         # 注意：不再需要LLM预处理，因为图谱中已经包含了间接调用结构（CALLS + ASSIGNED_TO）
         # LLM只在运行时用于分析delayed work的间接调用（_detect_async_call）
 
-        # 创建各个Agent（传入LLM客户端）
+        # 创建各个Agent（传入LLM客户端和KG接口）
         self.log_parser = LogParserAgent(
             enable_llm=enable_llm_log_analysis,
-            llm_client=llm_client
+            llm_client=llm_client,
+            kg_interface=self.kg
         )
         self.entity_locator = EntityLocatorAgent(self.kg)
         self.chain_tracer = CallChainTracerAgent(self.kg, llm_client)

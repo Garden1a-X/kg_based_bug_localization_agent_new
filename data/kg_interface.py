@@ -11,12 +11,7 @@ from pathlib import Path
 # ============================================================
 # TODO: 等图谱修复后删除这个导入
 # ============================================================
-from data.mock_indirect_calls import (
-    get_mock_async_bridge,
-    get_mock_function_pointer_bridge,
-    get_mock_indirect_callees,
-    get_mock_async_assigned_to
-)
+# Mock 数据已移除 - 现在完全依赖图谱数据
 
 
 class KnowledgeGraphInterface:
@@ -634,12 +629,7 @@ class KnowledgeGraphInterface:
         #         logger.debug(f"函数 {func_name} 使用LLM检测结果: {len(llm_callees)} 个间接调用")
         #         return llm_callees
 
-        # fallback到Mock数据（仅用于测试/兼容）
-        mock_callees = get_mock_indirect_callees(func_name)
-        if mock_callees:
-            logger.debug(f"函数 {func_name} 使用Mock数据: {len(mock_callees)} 个间接调用")
-            return mock_callees
-
+        # 没有找到间接调用
         return []
 
     def _detect_async_call(self, caller_name: str, callee_name: str) -> List[tuple]:
@@ -701,32 +691,7 @@ class KnowledgeGraphInterface:
             logger.debug(f"使用字段名查询 ASSIGNED_TO: {field_name}")
             async_targets = self._query_assigned_to_for_async(field_name)
 
-        # 6. 如果仍然没有结果，尝试 Mock 数据的直接映射
-        if not async_targets:
-            try:
-                from data.mock_indirect_calls import get_mock_async_assigned_to
-
-                # 尝试一些常见的字段名
-                common_field_names = ['detect', 'work', 'dwork', 'delayed_work']
-                for test_field in common_field_names:
-                    mock_targets = get_mock_async_assigned_to(test_field)
-                    if mock_targets:
-                        logger.debug(f"使用 Mock 数据 (字段: {test_field}): {mock_targets}")
-                        for target_name in mock_targets:
-                            async_targets.append((
-                                target_name,
-                                {
-                                    'bridge_type': 'async',
-                                    'bridge_entity': test_field,
-                                    'init_func': 'INIT_DELAYED_WORK',
-                                    'method': 'mock_data'
-                                }
-                            ))
-                        break
-            except ImportError:
-                pass
-
-        # 7. 缓存
+        # 6. 缓存结果
         self.async_call_cache[cache_key] = async_targets
         return async_targets
 
@@ -898,25 +863,6 @@ class KnowledgeGraphInterface:
         if targets:
             target_names = [t[0] for t in targets]
             logger.debug(f"✓ 从图谱找到字段 '{field_name}' 的赋值目标: {target_names}")
-
-        # 5. 补充 Mock 数据（合并模式）
-        # 即使图谱有数据，也检查mock，以便补充图谱中缺失的关系
-        mock_targets = get_mock_async_assigned_to(field_name)
-        if mock_targets:
-            # 去重：避免重复添加
-            existing_names = {t[0] for t in targets}
-            for target_name in mock_targets:
-                if target_name not in existing_names:
-                    targets.append((
-                        target_name,
-                        {
-                            'bridge_type': 'async',
-                            'bridge_entity': field_name,
-                            'init_func': 'INIT_DELAYED_WORK',
-                            'method': 'llm_analysis'  # 字段名是LLM提取的，只是ASSIGNED_TO来自mock
-                        }
-                    ))
-                    logger.info(f"✓ 补充 Mock 数据：{field_name} -> {target_name}")
 
         return targets
 
@@ -1830,15 +1776,7 @@ class KnowledgeGraphInterface:
                         'init_func': 'INIT_WORK/INIT_DELAYED_WORK'
                     }
 
-        # ============================================================
-        # TODO: 等图谱修复后删除这部分代码
-        # 作为临时方案，使用 mock 数据
-        # ============================================================
-        mock_bridge = get_mock_async_bridge(node_a, node_b)
-        if mock_bridge:
-            logger.debug(f"使用 mock 异步调用桥接: {node_a} -> {node_b}")
-            return mock_bridge
-
+        # 没有找到异步调用桥接
         return None
     
     def check_function_pointer_pattern(self, node_a: str, node_b: str) -> Optional[Dict]:
@@ -1867,15 +1805,7 @@ class KnowledgeGraphInterface:
                         'ops_var': src
                     }
 
-        # ============================================================
-        # TODO: 等图谱修复后删除这部分代码
-        # 作为临时方案，使用 mock 数据
-        # ============================================================
-        mock_bridge = get_mock_function_pointer_bridge(node_a, node_b)
-        if mock_bridge:
-            logger.debug(f"使用 mock 函数指针桥接: {node_a} -> {node_b}")
-            return mock_bridge
-
+        # 没有找到函数指针桥接
         return None
     
     # ============ 上下文查询 ============

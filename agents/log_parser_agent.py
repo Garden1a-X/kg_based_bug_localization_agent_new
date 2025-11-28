@@ -5,16 +5,50 @@
 import re
 from typing import Dict, List
 from agents.base_agent import BaseAgent
-from data.mock_indirect_calls import MOCK_FAIL_MESSAGES, _extract_message_pattern
+
+
+def _extract_message_pattern(fail_message_name: str) -> str:
+    """
+    从FAIL_MESSAGE的name字段提取用于日志匹配的模式
+
+    Args:
+        fail_message_name: FAIL_MESSAGE实体的name字段（如 'pr_err("xxx", ...)'）
+
+    Returns:
+        用于匹配的正则模式
+    """
+    # 提取引号内的字符串
+    # 匹配第一个双引号内的内容
+    string_match = re.search(r'"([^"]+)"', fail_message_name)
+    if not string_match:
+        return None
+
+    template = string_match.group(1)
+
+    # 将格式化占位符替换为通配符
+    # %s, %d, %u, %x 等 -> .*
+    pattern = re.sub(r'%[sduxXfgGp]', r'.*?', template)
+
+    # 转义特殊字符
+    pattern = re.escape(pattern)
+
+    # 还原通配符（之前被escape了）
+    pattern = pattern.replace(r'\.\*\?', '.*?')
+
+    # 移除换行符标记
+    pattern = pattern.replace(r'\\n', '')
+
+    return pattern
 
 
 class LogParserAgent(BaseAgent):
     """日志解析Agent - 基于FAIL_MESSAGE实体匹配"""
 
-    def __init__(self, enable_llm: bool = False, llm_client=None):
+    def __init__(self, enable_llm: bool = False, llm_client=None, kg_interface=None):
         super().__init__("LogParser")
         self.enable_llm = enable_llm
         self.llm_client = llm_client  # 统一的LLM客户端
+        self.kg = kg_interface  # 知识图谱接口（用于查询FAIL_MESSAGE）
 
         # 定义常见的错误模式（保留用于fallback）
         self.error_patterns = {
@@ -142,8 +176,38 @@ class LogParserAgent(BaseAgent):
             'all_functions': []
         }
 
+        # 从图谱查询FAIL_MESSAGE实体（如果KG可用）
+        fail_messages = {}
+        if self.kg:
+            try:
+                # 查询所有FAIL_MESSAGE实体
+                query = """
+                MATCH (msg:FAIL_MESSAGE)
+                RETURN msg.id as id, msg.name as name, msg.type as type,
+                       msg.scope as scope, msg.source_file as source_file,
+                       msg.start_line as start_line
+                """
+                results = self.kg.execute_query(query)
+                for r in results:
+                    fail_messages[r['id']] = {
+                        'id': r['id'],
+                        'name': r['name'],
+                        'type': r['type'],
+                        'scope': r['scope'],
+                        'source_file': r.get('source_file'),
+                        'start_line': r.get('start_line')
+                    }
+            except Exception as e:
+                self.log_warning(f"从图谱查询FAIL_MESSAGE失败: {e}")
+
+        # 如果图谱中没有FAIL_MESSAGE，使用基于正则的fallback
+        if not fail_messages:
+            self.log_warning("图谱中没有FAIL_MESSAGE实体，将使用正则表达式fallback")
+            # 返回简单的正则提取结果
+            return self._fallback_regex_parsing(log_text)
+
         for idx, line in enumerate(lines, 1):
-            matches = self._match_log_line_to_fail_message(line, MOCK_FAIL_MESSAGES)
+            matches = self._match_log_line_to_fail_message(line, fail_messages)
 
             if matches:
                 # 取最佳匹配（相似度最高）
@@ -178,6 +242,32 @@ class LogParserAgent(BaseAgent):
                     result['all_functions'].append(func_name)
 
         return result
+
+    def _fallback_regex_parsing(self, log_text: str) -> dict:
+        """
+        Fallback: 当图谱中没有FAIL_MESSAGE时，使用正则表达式解析
+
+        Args:
+            log_text: 日志文本
+
+        Returns:
+            基础解析结果
+        """
+        lines = [line.strip() for line in log_text.strip().split('\n') if line.strip()]
+
+        # 提取函数名
+        functions = []
+        for line in lines:
+            func_matches = re.findall(r'([a-zA-Z_][a-zA-Z0-9_]+)\s*\(', line)
+            functions.extend(func_matches)
+
+        functions = list(dict.fromkeys(functions))  # 去重并保持顺序
+
+        return {
+            'total_lines': len(lines),
+            'line_matches': [],  # 没有FAIL_MESSAGE匹配
+            'all_functions': functions
+        }
 
     def parse_log(
         self,
