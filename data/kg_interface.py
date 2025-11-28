@@ -312,29 +312,14 @@ class KnowledgeGraphInterface:
 
     def get_equivalent_ids(self, func_id):
         """
-        获取等价ID集合（包括所有同名函数的声明和实现）
+        获取等价ID集合（包括声明和实现）
 
         Args:
             func_id: 函数ID
 
         Returns:
-            等价ID集合（包括所有同名的声明和实现）
+            等价ID集合
         """
-        # 获取该函数的名称
-        entity = self.entity_by_id.get(func_id)
-        if not entity:
-            return {func_id}
-
-        func_name = entity.get('name')
-        if not func_name:
-            return {func_id}
-
-        # 返回所有同名函数的ID（包括所有声明和所有实现）
-        all_ids = self.func_name_to_ids.get(func_name, [])
-        if all_ids:
-            return set(all_ids)
-
-        # 如果func_name_to_ids中没有，回退到原来的逻辑
         equivalent = {func_id}
 
         # 如果是声明，添加对应的实现
@@ -1161,196 +1146,235 @@ class KnowledgeGraphInterface:
             if error_line:
                 print(f"注意: error_line参数已废弃 (传入值: {error_line})")
 
-        # 获取起点和终点的实体
-        start_entity = self.find_function(start)
+        # 获取终点的实体
         end_entity = self.find_function(end)
-
-        if not start_entity or not end_entity:
+        if not end_entity:
             if debug:
-                print(f"❌ 起点或终点不存在!")
+                print(f"❌ 终点不存在!")
             return []
 
-        start_id = start_entity.get('id')
         end_id = end_entity.get('id')
-
-        if not start_id or not end_id:
+        if not end_id:
             if debug:
-                print(f"❌ 起点或终点没有ID!")
+                print(f"❌ 终点没有ID!")
             return []
 
-        # 标准化为实现ID
-        start_id = self.normalize_id(start_id)
+        # 标准化终点为实现ID
         end_id = self.normalize_id(end_id)
-
         # 获取终点的等价ID集合
         end_equivalent_ids = self.get_equivalent_ids(end_id)
 
+        # 获取起点函数的所有ID（支持多个实现）
+        all_start_ids = self.func_name_to_ids.get(start, [])
+        if not all_start_ids:
+            if debug:
+                print(f"❌ 起点不存在!")
+            return []
+
+        # 过滤出所有实现（非声明）
+        start_impl_ids = []
+        for func_id in all_start_ids:
+            entity = self.entity_by_id.get(func_id)
+            if entity and not entity.get('is_declaration', False):
+                start_impl_ids.append(func_id)
+
+        # 如果没有实现，使用所有ID（包括声明）
+        if not start_impl_ids:
+            start_impl_ids = all_start_ids
+
+        # 标准化为实现ID
+        start_impl_ids = [self.normalize_id(sid) for sid in start_impl_ids]
+
         if debug:
             print(f"\n📌 ID信息:")
-            print(f"   起点ID: {start_id}")
+            print(f"   起点函数名: {start}")
+            print(f"   起点实现数量: {len(start_impl_ids)}")
+            print(f"   起点IDs: {start_impl_ids}")
             print(f"   终点ID: {end_id}")
             print(f"   终点等价ID: {end_equivalent_ids}")
 
-        # BFS搜索（支持间接调用和多路径）
+        # 对每个起点实现分别执行BFS搜索
         from collections import deque
 
-        # 队列元素：(当前id, 路径ids, 边类型, call_lines, 是否是间接调用目标)
-        # is_indirect_target=True 表示该节点是通过间接调用到达的，后续只查找直接调用
-        queue = deque([(start_id, [start_id], [], [], False)])
-        # 改变visited的记录方式：记录 (node_id, path_length) 以支持找到多条路径
-        visited_at_depth = {}  # {node_id: min_depth}
+        all_found_paths = []
+        total_nodes_explored = 0
+        total_max_queue_size = 0
 
-        found_paths = []
-        nodes_explored = 0
-        max_queue_size = 0
+        for start_idx, start_id in enumerate(start_impl_ids):
+            if debug and len(start_impl_ids) > 1:
+                start_entity = self.entity_by_id.get(start_id)
+                start_info = f"{start_entity.get('name')}@{start_entity.get('source_file', 'unknown')}" if start_entity else str(start_id)
+                print(f"\n🔄 BFS #{start_idx + 1}/{len(start_impl_ids)}: 起点 = {start_info}")
 
-        while queue and len(found_paths) < k:
-            nodes_explored += 1
-            max_queue_size = max(max_queue_size, len(queue))
+            # 队列元素：(当前id, 路径ids, 边类型, call_lines, 是否是间接调用目标)
+            # is_indirect_target=True 表示该节点是通过间接调用到达的，后续只查找直接调用
+            queue = deque([(start_id, [start_id], [], [], False)])
+            # 改变visited的记录方式：记录 (node_id, path_length) 以支持找到多条路径
+            visited_at_depth = {}  # {node_id: min_depth}
 
-            current_id, path_ids, edge_types, call_lines, is_indirect_target = queue.popleft()
-            current_depth = len(path_ids)
+            found_paths = []
+            nodes_explored = 0
+            max_queue_size = 0
 
-            if current_depth > max_depth:
-                continue
+            while queue and len(found_paths) < k:
+                nodes_explored += 1
+                max_queue_size = max(max_queue_size, len(queue))
 
-            # 检查是否到达终点
-            if current_id in end_equivalent_ids:
-                # 将id路径转换为名字路径
-                path_names = []
-                for entity_id in path_ids:
-                    entity = self.entity_by_id.get(entity_id)
-                    if entity:
-                        path_names.append(entity['name'])
+                current_id, path_ids, edge_types, call_lines, is_indirect_target = queue.popleft()
+                current_depth = len(path_ids)
 
-                # 计算路径得分
-                # 1. 越短越好（每个节点扣1分）
-                # 2. 间接调用越少越好（每个间接调用扣10分）
-                # 3. 调用发生得越早越好（call_line越小越好）
-                indirect_count = sum(1 for e in edge_types if isinstance(e, dict))
-
-                # 计算平均调用行号（忽略None值）
-                valid_call_lines = [cl for cl in call_lines if cl is not None]
-                avg_call_line = sum(valid_call_lines) / len(valid_call_lines) if valid_call_lines else 0
-
-                # 得分计算：基础分1000 - 路径长度 - 间接调用惩罚 - 调用行号惩罚
-                # 调用行号惩罚：平均行号除以100（让行号的影响小于间接调用）
-                score = 1000 - current_depth - indirect_count * 10 - avg_call_line / 100
-
-                found_paths.append({
-                    'path': path_names,
-                    'edges': edge_types,
-                    'call_lines': call_lines,
-                    'score': score,
-                    'length': current_depth,
-                    'indirect_count': indirect_count,
-                    'avg_call_line': avg_call_line
-                })
-
-                if debug:
-                    print(f"✅ 找到路径 #{len(found_paths)}: 长度={current_depth}, 间接调用={indirect_count}")
-
-                continue
-
-            # 检查是否应该继续探索（允许多次访问但控制深度）
-            if current_id in visited_at_depth:
-                if current_depth >= visited_at_depth[current_id] + 3:  # 允许深度差3以内的重复访问
-                    continue
-            visited_at_depth[current_id] = min(
-                visited_at_depth.get(current_id, float('inf')),
-                current_depth
-            )
-
-            current_entity = self.entity_by_id.get(current_id)
-            if not current_entity:
-                continue
-
-            current_name = current_entity['name']
-
-            # 1. 获取调用的邻居（带行号）
-            # 如果当前节点是间接调用的目标，只查找直接调用（allow_indirect=False）
-            # 这样可以避免间接调用的递归爆炸
-            allow_indirect_calls = not is_indirect_target
-            callees = self._get_callees_with_lines(current_id, error_line, allow_indirect=allow_indirect_calls)
-
-            for callee_name, callee_line, is_from_indirect in callees:
-                callee_entity = self.find_function(callee_name)
-                if not callee_entity:
+                if current_depth > max_depth:
                     continue
 
-                callee_id = callee_entity.get('id')
-                if not callee_id:
+                # 检查是否到达终点
+                if current_id in end_equivalent_ids:
+                    # 将id路径转换为名字路径
+                    path_names = []
+                    for entity_id in path_ids:
+                        entity = self.entity_by_id.get(entity_id)
+                        if entity:
+                            path_names.append(entity['name'])
+
+                    # 计算路径得分
+                    # 1. 越短越好（每个节点扣1分）
+                    # 2. 间接调用越少越好（每个间接调用扣10分）
+                    # 3. 调用发生得越早越好（call_line越小越好）
+                    indirect_count = sum(1 for e in edge_types if isinstance(e, dict))
+
+                    # 计算平均调用行号（忽略None值）
+                    valid_call_lines = [cl for cl in call_lines if cl is not None]
+                    avg_call_line = sum(valid_call_lines) / len(valid_call_lines) if valid_call_lines else 0
+
+                    # 得分计算：基础分1000 - 路径长度 - 间接调用惩罚 - 调用行号惩罚
+                    # 调用行号惩罚：平均行号除以100（让行号的影响小于间接调用）
+                    score = 1000 - current_depth - indirect_count * 10 - avg_call_line / 100
+
+                    found_paths.append({
+                        'path': path_names,
+                        'edges': edge_types,
+                        'call_lines': call_lines,
+                        'score': score,
+                        'length': current_depth,
+                        'indirect_count': indirect_count,
+                        'avg_call_line': avg_call_line
+                    })
+
+                    if debug:
+                        print(f"✅ 找到路径 #{len(found_paths)}: 长度={current_depth}, 间接调用={indirect_count}")
+
                     continue
 
-                callee_id = self.normalize_id(callee_id)
-                if not callee_id or callee_id in path_ids:  # 避免环路
+                # 检查是否应该继续探索（允许多次访问但控制深度）
+                if current_id in visited_at_depth:
+                    if current_depth >= visited_at_depth[current_id] + 3:  # 允许深度差3以内的重复访问
+                        continue
+                visited_at_depth[current_id] = min(
+                    visited_at_depth.get(current_id, float('inf')),
+                    current_depth
+                )
+
+                current_entity = self.entity_by_id.get(current_id)
+                if not current_entity:
                     continue
 
-                # 确定边的类型
-                if is_from_indirect:
-                    edge_type = {'type': 'indirect', 'bridge': {'bridge_type': 'function_pointer'}}
+                current_name = current_entity['name']
+
+                # 1. 获取调用的邻居（带行号）
+                # 如果当前节点是间接调用的目标，只查找直接调用（allow_indirect=False）
+                # 这样可以避免间接调用的递归爆炸
+                allow_indirect_calls = not is_indirect_target
+                callees = self._get_callees_with_lines(current_id, error_line, allow_indirect=allow_indirect_calls)
+
+                for callee_name, callee_line, is_from_indirect in callees:
+                    callee_entity = self.find_function(callee_name)
+                    if not callee_entity:
+                        continue
+
+                    callee_id = callee_entity.get('id')
+                    if not callee_id:
+                        continue
+
+                    callee_id = self.normalize_id(callee_id)
+                    if not callee_id or callee_id in path_ids:  # 避免环路
+                        continue
+
+                    # 确定边的类型
+                    if is_from_indirect:
+                        edge_type = {'type': 'indirect', 'bridge': {'bridge_type': 'function_pointer'}}
+                    else:
+                        edge_type = 'direct'
+
+                    # 添加到队列
+                    # 如果是通过间接调用找到的函数，标记 is_indirect_target=True
+                    # 这样该函数后续只会查找直接调用，避免递归爆炸
+                    queue.append((
+                        callee_id,
+                        path_ids + [callee_id],
+                        edge_types + [edge_type],
+                        call_lines + [callee_line],
+                        is_from_indirect  # 继承间接调用标记
+                    ))
+
+                    # 检查是否是异步调用函数（只在直接调用时检查）
+                    if not is_from_indirect and callee_name in self.async_functions:
+                        # 检测异步调用关系
+                        async_targets = self._detect_async_call(current_name, callee_name)
+
+                        for async_target_name, bridge_info in async_targets:
+                            async_target_entity = self.find_function(async_target_name)
+                            if not async_target_entity:
+                                continue
+
+                            async_target_id = async_target_entity.get('id')
+                            if not async_target_id:
+                                continue
+
+                            async_target_id = self.normalize_id(async_target_id)
+                            # 注意：async_target 可能已经在 path 中（避免环路）
+                            # 但 callee 一定不在 path 中（因为上面检查过了）
+                            if not async_target_id or async_target_id in path_ids + [callee_id]:
+                                continue
+
+                            # 添加异步调用边：current → callee → async_target
+                            # 路径包含两个节点：callee 和 async_target
+                            # 包含两条边：direct 和 async
+                            # 异步调用的目标函数也标记为 is_indirect_target=True（避免继续递归）
+                            queue.append((
+                                async_target_id,
+                                path_ids + [callee_id, async_target_id],
+                                edge_types + ['direct', {'type': 'async', 'bridge': bridge_info}],
+                                call_lines + [callee_line, None],  # 异步调用没有call_line
+                                True  # 异步调用的目标也是间接目标，后续只查找直接调用
+                            ))
+
+            # 收集当前起点的所有路径
+            all_found_paths.extend(found_paths)
+            total_nodes_explored += nodes_explored
+            total_max_queue_size = max(total_max_queue_size, max_queue_size)
+
+            if debug and len(start_impl_ids) > 1:
+                if found_paths:
+                    print(f"   ✅ 从该起点找到 {len(found_paths)} 条路径")
                 else:
-                    edge_type = 'direct'
+                    print(f"   ❌ 从该起点未找到路径")
 
-                # 添加到队列
-                # 如果是通过间接调用找到的函数，标记 is_indirect_target=True
-                # 这样该函数后续只会查找直接调用，避免递归爆炸
-                queue.append((
-                    callee_id,
-                    path_ids + [callee_id],
-                    edge_types + [edge_type],
-                    call_lines + [callee_line],
-                    is_from_indirect  # 继承间接调用标记
-                ))
-
-                # 检查是否是异步调用函数（只在直接调用时检查）
-                if not is_from_indirect and callee_name in self.async_functions:
-                    # 检测异步调用关系
-                    async_targets = self._detect_async_call(current_name, callee_name)
-
-                    for async_target_name, bridge_info in async_targets:
-                        async_target_entity = self.find_function(async_target_name)
-                        if not async_target_entity:
-                            continue
-
-                        async_target_id = async_target_entity.get('id')
-                        if not async_target_id:
-                            continue
-
-                        async_target_id = self.normalize_id(async_target_id)
-                        # 注意：async_target 可能已经在 path 中（避免环路）
-                        # 但 callee 一定不在 path 中（因为上面检查过了）
-                        if not async_target_id or async_target_id in path_ids + [callee_id]:
-                            continue
-
-                        # 添加异步调用边：current → callee → async_target
-                        # 路径包含两个节点：callee 和 async_target
-                        # 包含两条边：direct 和 async
-                        # 异步调用的目标函数也标记为 is_indirect_target=True（避免继续递归）
-                        queue.append((
-                            async_target_id,
-                            path_ids + [callee_id, async_target_id],
-                            edge_types + ['direct', {'type': 'async', 'bridge': bridge_info}],
-                            call_lines + [callee_line, None],  # 异步调用没有call_line
-                            True  # 异步调用的目标也是间接目标，后续只查找直接调用
-                        ))
-
-        # 按得分排序
-        found_paths.sort(key=lambda x: x['score'], reverse=True)
+        # 合并所有起点的路径，按得分排序
+        all_found_paths.sort(key=lambda x: x['score'], reverse=True)
 
         if debug:
             print(f"\n{'='*80}")
-            if found_paths:
-                print(f"✅ 找到 {len(found_paths)} 条路径")
+            if all_found_paths:
+                print(f"✅ 总共找到 {len(all_found_paths)} 条路径")
             else:
                 print(f"❌ 未找到路径")
             print(f"{'='*80}")
             print(f"📊 搜索统计:")
-            print(f"   总探索节点: {nodes_explored}")
-            print(f"   最大队列大小: {max_queue_size}")
+            print(f"   起点实现数量: {len(start_impl_ids)}")
+            print(f"   总探索节点: {total_nodes_explored}")
+            print(f"   最大队列大小: {total_max_queue_size}")
             print(f"{'='*80}\n")
 
-        return found_paths[:k]
+        return all_found_paths[:k]
 
     def query_assigned_to_by_field_name(self, field_name: str) -> List[str]:
         """
