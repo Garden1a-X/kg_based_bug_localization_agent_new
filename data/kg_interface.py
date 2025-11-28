@@ -824,23 +824,26 @@ class KnowledgeGraphInterface:
         # 2. 构建 field_id 集合用于快速查询
         field_id_set = set(field_ids)
 
-        # 3. 查询 ASSIGNED_TO 关系
-        assigned_to_relations = self.relations.get('ASSIGNED_TO', [])
+        # 3. 查询 ASSIGNED_TO 和 MOUNTED_TO 关系
+        field_to_func_relations = []
+        field_to_func_relations.extend(self.relations.get('ASSIGNED_TO', []))
+        field_to_func_relations.extend(self.relations.get('MOUNTED_TO', []))
         target_function_ids = []
 
-        logger.debug(f"查询 ASSIGNED_TO 关系，图谱中共有 {len(assigned_to_relations)} 条 ASSIGNED_TO 关系")
+        logger.debug(f"查询 ASSIGNED_TO/MOUNTED_TO 关系，图谱中共有 {len(field_to_func_relations)} 条关系")
 
-        for rel in assigned_to_relations:
+        for rel in field_to_func_relations:
             head_id = rel.get('head')
             tail_id = rel.get('tail')
 
-            # ASSIGNED_TO: head=FIELD_ID, tail=FUNCTION_ID
+            # ASSIGNED_TO/MOUNTED_TO: head=FIELD_ID, tail=FUNCTION_ID
             if head_id in field_id_set:
                 target_function_ids.append(tail_id)
-                logger.debug(f"  匹配到 ASSIGNED_TO: {head_id} -> {tail_id}")
+                rel_type = rel.get('type', 'ASSIGNED_TO')
+                logger.debug(f"  匹配到 {rel_type}: {head_id} -> {tail_id}")
 
         if not target_function_ids:
-            logger.debug(f"未在图谱中找到字段 {field_name} 的 ASSIGNED_TO 关系")
+            logger.debug(f"未在图谱中找到字段 {field_name} 的 ASSIGNED_TO/MOUNTED_TO 关系")
         else:
             logger.debug(f"在图谱中找到 {len(target_function_ids)} 个赋值目标")
 
@@ -1365,17 +1368,19 @@ class KnowledgeGraphInterface:
 
         logger.debug(f"找到 {len(field_ids)} 个名为 {field_name} 的 FIELD 实体")
 
-        # 2. 查询 ASSIGNED_TO 关系
+        # 2. 查询 ASSIGNED_TO 和 MOUNTED_TO 关系
         field_id_set = set(field_ids)
         target_function_names = []
 
-        assigned_to_relations = self.relations.get('ASSIGNED_TO', [])
+        field_to_func_relations = []
+        field_to_func_relations.extend(self.relations.get('ASSIGNED_TO', []))
+        field_to_func_relations.extend(self.relations.get('MOUNTED_TO', []))
 
-        for rel in assigned_to_relations:
+        for rel in field_to_func_relations:
             head_id = rel.get('head')
             tail_id = rel.get('tail')
 
-            # ASSIGNED_TO: head=FIELD_ID, tail=FUNCTION_ID
+            # ASSIGNED_TO/MOUNTED_TO: head=FIELD_ID, tail=FUNCTION_ID
             if head_id in field_id_set:
                 # 获取目标函数名
                 target_entity = self.entity_by_id.get(tail_id)
@@ -1383,12 +1388,13 @@ class KnowledgeGraphInterface:
                     target_name = target_entity.get('name')
                     if target_name:
                         target_function_names.append(target_name)
-                        logger.debug(f"  匹配到 ASSIGNED_TO: {field_name} -> {target_name}")
+                        rel_type = rel.get('type', 'ASSIGNED_TO')
+                        logger.debug(f"  匹配到 {rel_type}: {field_name} -> {target_name}")
 
         if target_function_names:
-            logger.debug(f"✓ 字段 '{field_name}' 的 ASSIGNED_TO 目标: {target_function_names}")
+            logger.debug(f"✓ 字段 '{field_name}' 的 ASSIGNED_TO/MOUNTED_TO 目标: {target_function_names}")
         else:
-            logger.debug(f"未找到字段 '{field_name}' 的 ASSIGNED_TO 关系")
+            logger.debug(f"未找到字段 '{field_name}' 的 ASSIGNED_TO/MOUNTED_TO 关系")
 
         return list(set(target_function_names))  # 去重
 
@@ -1762,9 +1768,13 @@ class KnowledgeGraphInterface:
             桥接信息，如果不存在返回None
         """
         # 首先尝试从真实图谱中查找
-        if 'ASSIGNED_TO' in self.relations:
-            # 查找 work_struct.func 指向 node_b 的关系
-            for rel in self.relations['ASSIGNED_TO']:
+        # 查找 work_struct.func 指向 node_b 的关系
+        field_to_func_relations = []
+        field_to_func_relations.extend(self.relations.get('ASSIGNED_TO', []))
+        field_to_func_relations.extend(self.relations.get('MOUNTED_TO', []))
+
+        if field_to_func_relations:
+            for rel in field_to_func_relations:
                 src = rel.get('source') or rel.get('from')
                 tgt = rel.get('target') or rel.get('to')
 
@@ -1791,9 +1801,13 @@ class KnowledgeGraphInterface:
             桥接信息，如果不存在返回None
         """
         # 首先尝试从真实图谱中查找
-        if 'ASSIGNED_TO' in self.relations:
-            # 查找 ops 相关的赋值
-            for rel in self.relations['ASSIGNED_TO']:
+        # 查找 ops 相关的赋值
+        field_to_func_relations = []
+        field_to_func_relations.extend(self.relations.get('ASSIGNED_TO', []))
+        field_to_func_relations.extend(self.relations.get('MOUNTED_TO', []))
+
+        if field_to_func_relations:
+            for rel in field_to_func_relations:
                 src = rel.get('source') or rel.get('from')
                 tgt = rel.get('target') or rel.get('to')
 

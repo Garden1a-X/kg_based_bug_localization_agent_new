@@ -277,9 +277,6 @@ if (host->ops && host->ops->execute_tuning)
         Returns:
             候选函数列表
         """
-        if 'ASSIGNED_TO' not in self.kg.relations:
-            return []
-
         # 步骤1: 找到所有名为field_name的FIELD实体ID
         field_ids = []
         for entity_id, entity in self.kg.entity_by_id.items():
@@ -289,11 +286,15 @@ if (host->ops && host->ops->execute_tuning)
         if not field_ids:
             return []
 
-        # 步骤2: 在ASSIGNED_TO关系中查找
+        # 步骤2: 在ASSIGNED_TO和MOUNTED_TO关系中查找
         field_id_set = set(field_ids)
         results = []
 
-        for rel in self.kg.relations['ASSIGNED_TO']:
+        field_to_func_relations = []
+        field_to_func_relations.extend(self.kg.relations.get('ASSIGNED_TO', []))
+        field_to_func_relations.extend(self.kg.relations.get('MOUNTED_TO', []))
+
+        for rel in field_to_func_relations:
             head_id = rel.get('head')  # FIELD实体ID
             tail_id = rel.get('tail')  # FUNCTION实体ID
 
