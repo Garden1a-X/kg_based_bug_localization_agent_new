@@ -363,9 +363,9 @@ def main():
 
         try:
             # 判断模式并执行
-            if is_manual_mode:
-                # 手动指定模式
-                print(f"🎯 模式: 手动指定起止点")
+            if is_manual_mode and not log_text:
+                # 纯手动指定模式（无日志）
+                print(f"🎯 模式: 手动指定起止点（无日志）")
                 print(f"   起点: {args.start_func}")
                 print(f"   终点: {args.end_func}")
                 if args.intermediate_funcs:
@@ -380,6 +380,22 @@ def main():
                     k=args.k,
                     subgraph_override=args.subgraph,
                     user_context=user_context
+                )
+            elif is_manual_mode and log_text:
+                # 混合模式（日志 + 用户指定起止点）
+                print(f"🔄 模式: 混合模式（日志 + 用户指定起止点）")
+                print(f"   用户指定起点: {args.start_func}")
+                print(f"   用户指定终点: {args.end_func}")
+                print(f"   日志解析结果将作为关键节点")
+                print()
+
+                result = coordinator.process_top_k(
+                    log_text,
+                    k=args.k,
+                    subgraph_override=args.subgraph,
+                    user_context=user_context,
+                    user_start_func=args.start_func,
+                    user_end_func=args.end_func
                 )
             else:
                 # 自动推断模式

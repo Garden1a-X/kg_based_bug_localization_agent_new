@@ -432,10 +432,17 @@ class MasterCoordinator:
         k: int = 5,
         error_line: int = None,
         subgraph_override: Optional[str] = None,
-        user_context: Optional[Dict] = None
+        user_context: Optional[Dict] = None,
+        user_start_func: Optional[str] = None,
+        user_end_func: Optional[str] = None
     ) -> Dict:
         """
         处理错误日志，返回Top-K条调用链
+
+        支持三种模式：
+        1. 纯自动模式：只提供日志，自动推断起止点
+        2. 混合模式：提供日志 + 用户指定起止点，日志解析结果作为关键节点
+        3. 手动模式：只提供起止点（使用 process_top_k_with_specific_functions）
 
         Args:
             log_text: 错误日志文本
@@ -443,6 +450,8 @@ class MasterCoordinator:
             error_line: 已废弃（保留用于兼容性，不再用于剪枝）
             subgraph_override: 手动指定子图（可选），如果提供则跳过自动选择
             user_context: 用户提供的上下文信息（可选），用于辅助入口选择
+            user_start_func: 用户指定的起点函数（可选），如果提供则覆盖日志推断结果
+            user_end_func: 用户指定的终点函数（可选），如果提供则覆盖日志推断结果
 
         Returns:
             包含多条路径的分析结果
@@ -540,6 +549,43 @@ class MasterCoordinator:
                 console.print("\n[cyan]💡 建议提供以下信息之一：[/cyan]")
                 for suggestion in parsed_log['suggestions'][:3]:
                     console.print(f"   • {suggestion}")
+            console.print()
+
+        # 混合模式：如果用户提供了起止点，将日志解析结果作为关键节点
+        if user_start_func or user_end_func:
+            console.print("\n[cyan]🔄 混合模式：使用用户指定的起止点[/cyan]")
+
+            # 收集日志解析出的函数作为关键节点
+            intermediate_funcs_from_log = []
+
+            if user_start_func:
+                # 用户指定了起点，将日志推断的起点作为关键节点
+                if parsed_log.get('inferred_entry') and parsed_log['inferred_entry'] != user_start_func:
+                    intermediate_funcs_from_log.append(parsed_log['inferred_entry'])
+                    console.print(f"   • 起点: [bold]{user_start_func}[/bold] (用户指定)")
+                    console.print(f"   • 日志推断的起点 '{parsed_log['inferred_entry']}' 作为关键节点")
+                else:
+                    console.print(f"   • 起点: [bold]{user_start_func}[/bold] (用户指定)")
+                parsed_log['inferred_entry'] = user_start_func
+
+            if user_end_func:
+                # 用户指定了终点，将日志推断的终点作为关键节点
+                if parsed_log.get('inferred_error_point') and parsed_log['inferred_error_point'] != user_end_func:
+                    intermediate_funcs_from_log.append(parsed_log['inferred_error_point'])
+                    console.print(f"   • 终点: [bold]{user_end_func}[/bold] (用户指定)")
+                    console.print(f"   • 日志推断的终点 '{parsed_log['inferred_error_point']}' 作为关键节点")
+                else:
+                    console.print(f"   • 终点: [bold]{user_end_func}[/bold] (用户指定)")
+                parsed_log['inferred_error_point'] = user_end_func
+
+            # 标记为混合模式
+            parsed_log['mode'] = 'hybrid'
+            parsed_log['user_provided_start'] = user_start_func
+            parsed_log['user_provided_end'] = user_end_func
+            parsed_log['intermediate_from_log'] = intermediate_funcs_from_log
+
+            if intermediate_funcs_from_log:
+                console.print(f"   • 关键节点: {', '.join(intermediate_funcs_from_log)}")
             console.print()
 
         # 第2步：实体定位

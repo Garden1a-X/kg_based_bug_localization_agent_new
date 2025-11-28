@@ -41,9 +41,20 @@ class EntityLocatorAgent(BaseAgent):
             result['end_entity'] = self._locate_function(parsed_log['inferred_error_point'])
         
         # 3. 如果有关键函数，定位它们
+        intermediate_func_names = []
+
+        # 收集所有中间节点函数名（来自日志解析或用户指定）
         if 'key_functions' in parsed_log:
+            intermediate_func_names.extend(parsed_log['key_functions'])
+
+        # 混合模式：日志推断的起止点作为关键节点
+        if 'intermediate_from_log' in parsed_log:
+            intermediate_func_names.extend(parsed_log['intermediate_from_log'])
+
+        # 定位所有中间节点
+        if intermediate_func_names:
             key_entities = []
-            for func_name in parsed_log['key_functions']:
+            for func_name in intermediate_func_names:
                 entity = self._locate_function(func_name)
                 if entity:
                     key_entities.append(entity)
