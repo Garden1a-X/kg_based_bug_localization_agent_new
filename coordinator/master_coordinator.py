@@ -175,6 +175,11 @@ class MasterCoordinator:
                         # 重新初始化依赖KG的Agent
                         self.entity_locator = EntityLocatorAgent(self.kg)
                         self.chain_tracer = CallChainTracerAgent(self.kg, self.llm_client)
+                        self.log_parser = LogParserAgent(
+                            enable_llm=self.enable_llm_log_analysis,
+                            llm_client=self.llm_client,
+                            kg_interface=self.kg
+                        )
 
                         print_success(f"已切换到子图: {selected_subgraph}")
                     else:
@@ -521,6 +526,11 @@ class MasterCoordinator:
                         # 重新初始化依赖KG的Agent
                         self.entity_locator = EntityLocatorAgent(self.kg)
                         self.chain_tracer = CallChainTracerAgent(self.kg, self.llm_client)
+                        self.log_parser = LogParserAgent(
+                            enable_llm=self.enable_llm_log_analysis,
+                            llm_client=self.llm_client,
+                            kg_interface=self.kg
+                        )
 
                         print_success(f"已切换到子图: {selected_subgraph}")
                     else:
@@ -723,6 +733,11 @@ class MasterCoordinator:
                         # 重新初始化依赖KG的Agent
                         self.entity_locator = EntityLocatorAgent(self.kg)
                         self.chain_tracer = CallChainTracerAgent(self.kg, self.llm_client)
+                        self.log_parser = LogParserAgent(
+                            enable_llm=self.enable_llm_log_analysis,
+                            llm_client=self.llm_client,
+                            kg_interface=self.kg
+                        )
 
                         print_success(f"已切换到子图: {selected_subgraph}")
                     else:
