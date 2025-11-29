@@ -50,6 +50,15 @@ class LogParserAgent(BaseAgent):
         self.llm_client = llm_client  # 统一的LLM客户端
         self.kg = kg_interface  # 知识图谱接口（用于查询FAIL_MESSAGE）
 
+        # DEBUG: 打印初始化时的KG信息
+        if self.kg:
+            self.log_info(f"[DEBUG] LogParser 初始化: self.kg 实例 ID = {id(self.kg)}")
+            self.log_info(f"[DEBUG] LogParser 初始化: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
+            fail_msg_count = sum(1 for e in self.kg.entity_by_id.values() if e.get('type') == 'FAIL_MESSAGE')
+            self.log_info(f"[DEBUG] LogParser 初始化: 其中有 {fail_msg_count} 个 FAIL_MESSAGE 实体")
+        else:
+            self.log_warning(f"[DEBUG] LogParser 初始化: self.kg 为 None")
+
         # 定义常见的错误模式（保留用于fallback）
         self.error_patterns = {
             'error_message': r'(error|Error|ERROR)[:\s]+(.+?)(?:\n|$)',
@@ -180,6 +189,14 @@ class LogParserAgent(BaseAgent):
         fail_messages = {}
         if self.kg:
             try:
+                # DEBUG: 打印KG实例信息
+                self.log_info(f"[DEBUG] self.kg 实例 ID: {id(self.kg)}")
+                self.log_info(f"[DEBUG] self.kg.entity_by_id 总共有 {len(self.kg.entity_by_id)} 个实体")
+
+                # 统计FAIL_MESSAGE数量
+                fail_msg_count = sum(1 for e in self.kg.entity_by_id.values() if e.get('type') == 'FAIL_MESSAGE')
+                self.log_info(f"[DEBUG] entity_by_id 中有 {fail_msg_count} 个 FAIL_MESSAGE 实体")
+
                 # 从图谱中查询所有FAIL_MESSAGE实体
                 # 遍历 entity_by_id，过滤出 type='FAIL_MESSAGE' 的实体
                 for entity_id, entity in self.kg.entity_by_id.items():
@@ -193,10 +210,14 @@ class LogParserAgent(BaseAgent):
                             'start_line': entity.get('start_line')
                         }
 
+                self.log_info(f"[DEBUG] 收集到 fail_messages 字典中的数量: {len(fail_messages)}")
+
                 if fail_messages:
                     self.log_info(f"从图谱加载了 {len(fail_messages)} 个 FAIL_MESSAGE 实体")
             except Exception as e:
                 self.log_warning(f"从图谱查询FAIL_MESSAGE失败: {e}")
+                import traceback
+                self.log_warning(f"[DEBUG] 异常堆栈: {traceback.format_exc()}")
 
         # 如果图谱中没有FAIL_MESSAGE，使用基于正则的fallback
         if not fail_messages:

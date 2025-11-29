@@ -148,6 +148,11 @@ class MasterCoordinator:
                         kg_interface=self.kg
                     )
 
+                    # DEBUG: 打印切换后的状态
+                    logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
+
                     print_success(f"已切换到子图: {selected_subgraph}")
                 else:
                     logger.warning(f"子图路径不存在: {selected_subgraph}，使用默认图谱")
@@ -180,6 +185,11 @@ class MasterCoordinator:
                             llm_client=self.llm_client,
                             kg_interface=self.kg
                         )
+
+                        # DEBUG: 打印切换后的状态
+                        logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
 
                         print_success(f"已切换到子图: {selected_subgraph}")
                     else:
@@ -498,6 +508,11 @@ class MasterCoordinator:
                         kg_interface=self.kg
                     )
 
+                    # DEBUG: 打印切换后的状态
+                    logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
+
                     print_success(f"已切换到子图: {selected_subgraph}")
                 else:
                     logger.warning(f"子图路径不存在: {selected_subgraph}，使用默认图谱")
@@ -531,6 +546,11 @@ class MasterCoordinator:
                             llm_client=self.llm_client,
                             kg_interface=self.kg
                         )
+
+                        # DEBUG: 打印切换后的状态
+                        logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
 
                         print_success(f"已切换到子图: {selected_subgraph}")
                     else:
@@ -701,6 +721,11 @@ class MasterCoordinator:
                         kg_interface=self.kg
                     )
 
+                    # DEBUG: 打印切换后的状态
+                    logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
+
                     print_success(f"已切换到子图: {selected_subgraph}")
                 else:
                     logger.warning(f"子图路径不存在: {selected_subgraph}，使用默认图谱")
@@ -738,6 +763,11 @@ class MasterCoordinator:
                             llm_client=self.llm_client,
                             kg_interface=self.kg
                         )
+
+                        # DEBUG: 打印切换后的状态
+                        logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
 
                         print_success(f"已切换到子图: {selected_subgraph}")
                     else:
