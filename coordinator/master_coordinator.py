@@ -101,8 +101,9 @@ class MasterCoordinator:
         self.entity_locator = EntityLocatorAgent(self.kg)
         self.chain_tracer = CallChainTracerAgent(self.kg, llm_client)
 
-        # 保存enable_llm_detection以便重新初始化时使用
+        # 保存LLM配置以便重新初始化时使用
         self.enable_llm_detection = enable_llm_detection
+        self.enable_llm_log_analysis = enable_llm_log_analysis
 
         logger.success("协调器初始化完成")
     
