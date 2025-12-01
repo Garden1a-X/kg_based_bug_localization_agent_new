@@ -17,7 +17,7 @@ from pathlib import Path
 class KnowledgeGraphInterface:
     """知识图谱接口 - 基于JSON文件"""
 
-    def __init__(self, data_dir: str = None, enable_llm_detection: bool = False, llm_client=None):
+    def __init__(self, data_dir: str = None, enable_llm_detection: bool = False, llm_client=None, path_mappings: dict = None):
         """
         初始化知识图谱接口
 
@@ -25,6 +25,8 @@ class KnowledgeGraphInterface:
             data_dir: 数据文件所在目录
             enable_llm_detection: 是否启用LLM辅助间接调用检测（运行时）
             llm_client: LLM客户端实例（可选）
+            path_mappings: 路径映射字典，用于将图谱中的路径映射到当前环境
+                          例如: {"E:\\cpppro\\clang_kg\\linux": "/data/xuao/code_kg/data/linux_data"}
         """
         if data_dir is None:
             data_dir = os.getenv('KG_DATA_DIR', '/data/xuao/code_kg_search/linux_test/data')
@@ -32,6 +34,13 @@ class KnowledgeGraphInterface:
         self.data_dir = Path(data_dir)
         self.enable_llm_detection = enable_llm_detection
         self.llm_client = llm_client  # 统一的LLM客户端
+
+        # 路径映射配置
+        self.path_mappings = path_mappings or {}
+        if self.path_mappings:
+            logger.info(f"  ✓ 配置路径映射: {len(self.path_mappings)} 个")
+            for old_path, new_path in self.path_mappings.items():
+                logger.info(f"    {old_path} -> {new_path}")
 
         # 缓存数据
         self.entities = {}  # {entity_type: {name: entity}}
@@ -695,6 +704,34 @@ class KnowledgeGraphInterface:
         self.async_call_cache[cache_key] = async_targets
         return async_targets
 
+    def _remap_path(self, path: str) -> str:
+        """
+        应用路径映射，将图谱中的路径转换为当前环境的路径
+
+        Args:
+            path: 原始路径
+
+        Returns:
+            重映射后的路径
+        """
+        if not self.path_mappings:
+            return path
+
+        # 尝试每个映射规则
+        for old_prefix, new_prefix in self.path_mappings.items():
+            # 处理 Windows 路径分隔符
+            normalized_path = path.replace('\\', '/')
+            normalized_old = old_prefix.replace('\\', '/')
+
+            if normalized_path.startswith(normalized_old):
+                # 替换前缀
+                relative_part = normalized_path[len(normalized_old):]
+                remapped = new_prefix + relative_part
+                logger.debug(f"路径映射: {path} -> {remapped}")
+                return remapped
+
+        return path
+
     def _get_function_source(self, func_name: str) -> Optional[str]:
         """
         获取函数源代码
@@ -739,12 +776,15 @@ class KnowledgeGraphInterface:
             end_line = func_entity.get('end_line')
 
             if source_file and start_line and end_line:
+                # 应用路径映射
+                remapped_file = self._remap_path(source_file)
+
                 try:
-                    with open(source_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(remapped_file, 'r', encoding='utf-8', errors='ignore') as f:
                         lines = f.readlines()
                         source_code = ''.join(lines[start_line-1:end_line])
                 except Exception as e:
-                    logger.debug(f"读取源文件失败: {e}")
+                    logger.debug(f"读取源文件失败 ({remapped_file}): {e}")
                     return None
 
         return source_code

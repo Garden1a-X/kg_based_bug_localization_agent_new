@@ -183,6 +183,14 @@ def parse_args():
         help='用户上下文文件路径（YAML格式，提供平台、驱动等额外信息）'
     )
 
+    # 路径映射
+    parser.add_argument(
+        '--path-mapping',
+        action='append',
+        help='路径映射规则，格式：旧路径:新路径（可多次指定）\n'
+             '例如：--path-mapping "E:\\\\cpppro\\\\clang_kg\\\\linux:/data/xuao/code_kg/data/linux_data"'
+    )
+
     # 输出配置
     parser.add_argument(
         '--output',
@@ -223,6 +231,19 @@ def create_coordinator(args) -> MasterCoordinator:
             'api_key': ''
         }
 
+    # 解析路径映射
+    path_mappings = {}
+    if args.path_mapping:
+        for mapping in args.path_mapping:
+            if ':' in mapping:
+                parts = mapping.split(':', 1)
+                old_path = parts[0].strip()
+                new_path = parts[1].strip()
+                path_mappings[old_path] = new_path
+                print(f"📍 路径映射: {old_path} -> {new_path}")
+            else:
+                print(f"⚠️  忽略无效的路径映射: {mapping}（格式应为 '旧路径:新路径'）")
+
     # 创建协调器
     coordinator = MasterCoordinator(
         data_dir=args.data_dir,
@@ -230,7 +251,8 @@ def create_coordinator(args) -> MasterCoordinator:
         enable_llm_detection=args.enable_llm_detection,
         enable_llm_log_analysis=args.enable_llm_log_analysis,
         enable_subgraph_selection=args.enable_subgraph_selection,
-        llm_config=llm_config
+        llm_config=llm_config,
+        path_mappings=path_mappings if path_mappings else None
     )
 
     return coordinator

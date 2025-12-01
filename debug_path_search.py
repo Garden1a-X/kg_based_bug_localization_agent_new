@@ -34,12 +34,23 @@ def main():
         api_key=''
     )
 
+    # 路径映射配置
+    path_mappings = {
+        "E:\\cpppro\\clang_kg\\linux": "/data/xuao/code_kg/data/linux_data"
+    }
+
+    print("路径映射配置:")
+    for old_path, new_path in path_mappings.items():
+        print(f"  {old_path} -> {new_path}")
+    print()
+
     # 加载知识图谱（启用 LLM 检测）
     print("加载知识图谱（启用 LLM 间接调用检测）...")
     kg = KnowledgeGraphInterface(
         data_dir,
         enable_llm_detection=True,  # 重要！启用 LLM 检测
-        llm_client=llm_client
+        llm_client=llm_client,
+        path_mappings=path_mappings
     )
     print()
 

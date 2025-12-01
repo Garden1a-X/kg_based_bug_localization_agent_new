@@ -29,7 +29,8 @@ class MasterCoordinator:
         enable_llm_detection: bool = False,
         enable_llm_log_analysis: bool = False,
         enable_subgraph_selection: bool = False,
-        llm_config: Optional[Dict] = None
+        llm_config: Optional[Dict] = None,
+        path_mappings: Optional[Dict] = None
     ):
         """
         初始化协调器
@@ -42,12 +43,15 @@ class MasterCoordinator:
             enable_subgraph_selection: 是否启用子图自动选择
             llm_config: LLM配置（如果需要自动创建LLM客户端）
                 例如: {'backend': 'openai', 'model': 'gpt-4o-mini', 'base_url': '...'}
+            path_mappings: 路径映射字典（可选）
+                例如: {"E:\\cpppro\\clang_kg\\linux": "/data/xuao/code_kg/data/linux_data"}
         """
         logger.info("初始化主协调器...")
 
         # 保存配置
         self.base_data_dir = data_dir
         self.enable_subgraph_selection = enable_subgraph_selection
+        self.path_mappings = path_mappings or {}
 
         # 如果需要LLM但没有提供客户端，则创建统一的LLM客户端
         if (enable_llm_detection or enable_llm_log_analysis or enable_subgraph_selection) and llm_client is None:
@@ -81,12 +85,13 @@ class MasterCoordinator:
             )
             logger.info(f"子图选择器已启用，发现 {len(self.subgraph_selector.available_subgraphs)} 个子图")
 
-        # 创建知识图谱接口（传入LLM客户端）
+        # 创建知识图谱接口（传入LLM客户端和路径映射）
         # 注意：如果启用子图选择，这里可能会在process时重新初始化
         self.kg = KnowledgeGraphInterface(
             data_dir,
             enable_llm_detection=enable_llm_detection,
-            llm_client=llm_client
+            llm_client=llm_client,
+            path_mappings=self.path_mappings
         )
 
         # 注意：不再需要LLM预处理，因为图谱中已经包含了间接调用结构（CALLS + ASSIGNED_TO）
@@ -137,7 +142,8 @@ class MasterCoordinator:
                     self.kg = KnowledgeGraphInterface(
                         str(subgraph_path),
                         enable_llm_detection=self.enable_llm_detection,
-                        llm_client=self.llm_client
+                        llm_client=self.llm_client,
+                        path_mappings=self.path_mappings
                     )
 
                     # 重新初始化依赖KG的Agent
@@ -497,7 +503,8 @@ class MasterCoordinator:
                     self.kg = KnowledgeGraphInterface(
                         str(subgraph_path),
                         enable_llm_detection=self.enable_llm_detection,
-                        llm_client=self.llm_client
+                        llm_client=self.llm_client,
+                        path_mappings=self.path_mappings
                     )
 
                     # 重新初始化依赖KG的Agent
@@ -710,7 +717,8 @@ class MasterCoordinator:
                     self.kg = KnowledgeGraphInterface(
                         str(subgraph_path),
                         enable_llm_detection=self.enable_llm_detection,
-                        llm_client=self.llm_client
+                        llm_client=self.llm_client,
+                        path_mappings=self.path_mappings
                     )
 
                     # 重新初始化依赖KG的Agent
