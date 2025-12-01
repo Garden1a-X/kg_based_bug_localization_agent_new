@@ -41,6 +41,60 @@ def _extract_message_pattern(fail_message_name: str) -> str:
     return pattern
 
 
+def _calculate_pattern_quality(pattern: str, original_template: str) -> float:
+    """
+    计算模式的质量分数
+
+    高质量模式：包含具体关键词，如 "tuning execution failed"
+    低质量模式：只有通配符，如 ".*?-.*?" 或 ".*?"
+
+    Args:
+        pattern: 正则表达式模式
+        original_template: 原始模板字符串（替换占位符前）
+
+    Returns:
+        质量分数 (0.0 - 1.0)
+    """
+    if not pattern:
+        return 0.0
+
+    # 移除通配符，看剩下多少实际内容
+    pattern_without_wildcards = pattern.replace('.*?', '')
+
+    # 如果去掉通配符后什么都不剩，说明是纯通配符模式
+    if not pattern_without_wildcards or len(pattern_without_wildcards.strip()) == 0:
+        return 0.1  # 最低质量
+
+    # 计算实际关键词的长度
+    keyword_length = len(pattern_without_wildcards)
+    total_length = len(pattern)
+
+    # 关键词占比
+    keyword_ratio = keyword_length / total_length if total_length > 0 else 0
+
+    # 统计实际单词数量（连续的字母数字字符）
+    words = re.findall(r'[a-zA-Z0-9]{3,}', pattern_without_wildcards)  # 至少3个字符的单词
+    word_count = len(words)
+
+    # 基础分数：关键词占比
+    base_score = keyword_ratio
+
+    # 奖励：包含多个实际单词
+    word_bonus = min(word_count * 0.15, 0.5)  # 每个单词+0.15，最多+0.5
+
+    # 惩罚：如果模式太短（可能是过于简单的模式）
+    if keyword_length < 5:
+        length_penalty = 0.3
+    else:
+        length_penalty = 0.0
+
+    # 最终分数
+    quality_score = min(base_score + word_bonus - length_penalty, 1.0)
+    quality_score = max(quality_score, 0.1)  # 确保最低分为0.1
+
+    return quality_score
+
+
 class LogParserAgent(BaseAgent):
     """日志解析Agent - 基于FAIL_MESSAGE实体匹配"""
 
@@ -133,6 +187,50 @@ class LogParserAgent(BaseAgent):
         lines = re.findall(r':(\d+):', log_text)
         return [int(l) for l in lines]
 
+    def _extract_function_names_from_log(self, log_text: str) -> list:
+        """
+        从日志文本中提取可能的函数名（补充FAIL_MESSAGE匹配）
+
+        提取策略：
+        1. 匹配看起来像函数名的词：[a-z_][a-z0-9_]+
+        2. 在图谱中验证是否存在
+        3. 过滤掉常见的非函数词（如 error, failed 等）
+
+        Args:
+            log_text: 日志文本
+
+        Returns:
+            在图谱中存在的函数名列表
+        """
+        if not self.kg:
+            return []
+
+        # 常见的非函数关键词（排除）
+        excluded_words = {
+            'error', 'failed', 'warning', 'info', 'debug', 'trace',
+            'mmc0', 'mmc1', 'mmc2', 'null', 'true', 'false',
+            'dev', 'host', 'card', 'bus', 'reg', 'data'
+        }
+
+        # 提取所有潜在的函数名（以小写字母或下划线开头）
+        potential_funcs = re.findall(r'\b[a-z_][a-z0-9_]{2,}\b', log_text.lower())
+
+        # 去重
+        potential_funcs = list(dict.fromkeys(potential_funcs))
+
+        # 在图谱中验证
+        verified_functions = []
+        for func_name in potential_funcs:
+            # 排除常见非函数词
+            if func_name in excluded_words:
+                continue
+
+            # 在图谱中查找（检查是否有这个名字的函数实体）
+            if func_name in self.kg.func_name_to_ids:
+                verified_functions.append(func_name)
+
+        return verified_functions
+
     def _match_log_line_to_fail_message(self, log_line: str, fail_messages: dict) -> list:
         """
         尝试将一行日志匹配到FAIL_MESSAGE实体
@@ -147,9 +245,22 @@ class LogParserAgent(BaseAgent):
         matches = []
 
         for msg_id, msg_data in fail_messages.items():
+            fail_message_name = msg_data.get('name', '')
+
             # 从name字段提取匹配模式
-            pattern = _extract_message_pattern(msg_data.get('name', ''))
+            pattern = _extract_message_pattern(fail_message_name)
             if not pattern:
+                continue
+
+            # 提取原始模板（用于计算质量）
+            template_match = re.search(r'"([^"]+)"', fail_message_name)
+            original_template = template_match.group(1) if template_match else ""
+
+            # 计算模式质量
+            pattern_quality = _calculate_pattern_quality(pattern, original_template)
+
+            # 如果模式质量太低，直接跳过
+            if pattern_quality < 0.2:
                 continue
 
             # 尝试匹配
@@ -157,8 +268,12 @@ class LogParserAgent(BaseAgent):
             if match_obj:
                 matched_text = match_obj.group(0)
 
-                # 计算相似度（匹配长度占日志行的比例）
-                similarity = len(matched_text) / len(log_line.strip()) if log_line.strip() else 0
+                # 计算匹配长度占比
+                length_ratio = len(matched_text) / len(log_line.strip()) if log_line.strip() else 0
+
+                # 综合相似度 = 匹配长度占比 * 模式质量
+                # 这样高质量的模式会得到更高的分数
+                similarity = length_ratio * pattern_quality
 
                 matches.append((msg_id, msg_data, matched_text, similarity))
 
@@ -259,6 +374,15 @@ class LogParserAgent(BaseAgent):
 
                 if func_name and func_name not in result['all_functions']:
                     result['all_functions'].append(func_name)
+
+        # 补充：从日志文本中提取显式的函数名（防止遗漏）
+        extracted_funcs = self._extract_function_names_from_log(log_text)
+        if extracted_funcs:
+            self.log_info(f"从日志文本中提取到 {len(extracted_funcs)} 个函数名: {extracted_funcs[:5]}...")
+            # 合并到结果中（去重）
+            for func in extracted_funcs:
+                if func not in result['all_functions']:
+                    result['all_functions'].append(func)
 
         return result
 
