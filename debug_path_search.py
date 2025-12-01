@@ -53,12 +53,22 @@ def main():
 
         # 检查直接调用
         start_id = start_entity.get('id')
-        callees = kg.call_graph.get(start_id, [])
+        callees = kg.call_graph_with_lines.get(start_id, [])
         print(f"  ✓ 直接调用 {len(callees)} 个函数:")
-        for callee_id in callees[:10]:
+        for callee_info in callees[:10]:
+            if isinstance(callee_info, dict):
+                callee_id = callee_info.get('callee_id')
+                call_line = callee_info.get('call_line')
+            else:
+                callee_id = callee_info
+                call_line = None
+
             callee = kg.entity_by_id.get(callee_id)
             if callee:
-                print(f"      - {callee.get('name')}")
+                if call_line:
+                    print(f"      - {callee.get('name')} (行 {call_line})")
+                else:
+                    print(f"      - {callee.get('name')}")
     else:
         print(f"  ✗ 未找到")
     print()
