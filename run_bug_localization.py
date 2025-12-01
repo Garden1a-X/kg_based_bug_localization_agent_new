@@ -441,7 +441,9 @@ def main():
                     log_text,
                     k=args.k,
                     subgraph_override=args.subgraph,
-                    user_context=user_context
+                    user_context=user_context,
+                    user_start_func=args.start_func,
+                    user_end_func=args.end_func
                 )
 
             # 保存结果
