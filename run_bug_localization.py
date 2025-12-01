@@ -235,10 +235,23 @@ def create_coordinator(args) -> MasterCoordinator:
     path_mappings = {}
     if args.path_mapping:
         for mapping in args.path_mapping:
-            if ':' in mapping:
-                parts = mapping.split(':', 1)
-                old_path = parts[0].strip()
-                new_path = parts[1].strip()
+            # 智能分割：处理 Windows 路径中的冒号（如 E:\path）
+            # 策略：从右向左查找冒号，如果冒号前面不是单个字母（Windows盘符），则作为分隔符
+            colon_index = -1
+            for i in range(len(mapping) - 1, -1, -1):
+                if mapping[i] == ':':
+                    # 检查是否是 Windows 盘符（前面只有一个字母或字母+反斜杠）
+                    if i == 1 or (i > 1 and mapping[i-2] in ['\\', '/']):
+                        # 这是 Windows 盘符，继续找前一个冒号
+                        continue
+                    else:
+                        # 这是分隔符
+                        colon_index = i
+                        break
+
+            if colon_index > 0:
+                old_path = mapping[:colon_index].strip()
+                new_path = mapping[colon_index+1:].strip()
                 path_mappings[old_path] = new_path
                 print(f"📍 路径映射: {old_path} -> {new_path}")
             else:
