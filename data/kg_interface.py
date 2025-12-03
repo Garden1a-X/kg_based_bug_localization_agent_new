@@ -658,47 +658,68 @@ class KnowledgeGraphInterface:
         Returns:
             [(async_target, bridge_info), ...]
         """
+        logger.info(f"🔍 检测到异步调用: {caller_name} -> {callee_name}")
+
         # 1. 检查缓存
         cache_key = (caller_name, callee_name)
         if cache_key in self.async_call_cache:
-            logger.debug(f"使用缓存的异步调用: {caller_name} -> {callee_name}")
-            return self.async_call_cache[cache_key]
+            cached_targets = self.async_call_cache[cache_key]
+            logger.info(f"  ✓ 使用缓存结果: 找到 {len(cached_targets)} 个异步目标")
+            for target_name, _ in cached_targets:
+                logger.info(f"    → {target_name}")
+            return cached_targets
 
         # 2. 获取 caller 的源码
+        logger.info(f"  📖 读取 {caller_name} 的源码...")
         caller_source = self._get_function_source(caller_name)
         if not caller_source:
-            logger.debug(f"无法获取 {caller_name} 的源码，跳过异步调用检测")
+            logger.warning(f"  ✗ 无法获取源码，跳过异步调用检测")
             self.async_call_cache[cache_key] = []
             return []
+
+        logger.info(f"  ✓ 源码读取成功 (长度: {len(caller_source)} 字符)")
 
         # 3. LLM提取参数字段名（如果启用LLM）
         field_name = None
         if self.enable_llm_detection:
+            logger.info(f"  🤖 使用 LLM 分析源码，提取参数字段名...")
             field_name = self._llm_extract_async_parameter(caller_name, callee_name, caller_source)
             if field_name:
-                logger.info(f"LLM提取到字段名: {field_name} (从 {caller_name} 调用 {callee_name})")
+                logger.info(f"  ✓ LLM 提取成功: 字段名 = '{field_name}'")
 
         # 4. 如果 LLM 未提取到字段名，尝试使用常见模式
         if not field_name:
+            logger.info(f"  🔎 使用正则表达式提取参数字段名...")
             # 尝试从源码中用简单正则提取
             import re
             # 匹配模式：schedule_*(&xxx->field) 或 schedule_*(&field)
             match = re.search(rf'{re.escape(callee_name)}\s*\(\s*&\w*->(\w+)', caller_source)
             if match:
                 field_name = match.group(1)
-                logger.debug(f"正则提取到字段名: {field_name}")
+                logger.info(f"  ✓ 正则提取成功: 字段名 = '{field_name}' (模式: &xxx->{field_name})")
             else:
                 # 尝试匹配 schedule_*(&field)
                 match = re.search(rf'{re.escape(callee_name)}\s*\(\s*&(\w+)', caller_source)
                 if match:
                     field_name = match.group(1)
-                    logger.debug(f"正则提取到字段名: {field_name}")
+                    logger.info(f"  ✓ 正则提取成功: 字段名 = '{field_name}' (模式: &{field_name})")
+                else:
+                    logger.warning(f"  ✗ 正则提取失败，未找到参数字段")
 
         # 5. 如果还是没有，尝试 Mock 数据
         async_targets = []
         if field_name:
-            logger.debug(f"使用字段名查询 ASSIGNED_TO: {field_name}")
+            logger.info(f"  🔗 查询 MOUNTED_TO/ASSIGNED_TO 关系: 字段名 = '{field_name}'")
             async_targets = self._query_assigned_to_for_async(field_name)
+
+            if async_targets:
+                logger.info(f"  ✓ 找到 {len(async_targets)} 个异步目标函数:")
+                for target_name, bridge_info in async_targets:
+                    logger.info(f"    → {target_name} (method={bridge_info.get('method', 'unknown')})")
+            else:
+                logger.warning(f"  ✗ 未找到异步目标函数")
+        else:
+            logger.warning(f"  ✗ 未提取到字段名，无法查询异步目标")
 
         # 6. 缓存结果
         self.async_call_cache[cache_key] = async_targets
@@ -831,6 +852,8 @@ class KnowledgeGraphInterface:
         Returns:
             [(target_func, bridge_info), ...]
         """
+        logger.info(f"    🔍 查找字段 '{field_name}' 的 FIELD 实体...")
+
         # 先尝试图谱查询
         # 1. 找到所有名为 field_name 的 FIELD 实体
         field_ids = []
@@ -857,20 +880,29 @@ class KnowledgeGraphInterface:
                     field_ids.append(entity_id)
 
         if not field_ids:
-            logger.debug(f"未找到名为 {field_name} 的 FIELD 实体")
+            logger.warning(f"    ✗ 未找到名为 '{field_name}' 的 FIELD 实体")
+            return []
         else:
-            logger.debug(f"找到 {len(field_ids)} 个名为 {field_name} 的 FIELD 实体: {field_ids}")
+            logger.info(f"    ✓ 找到 {len(field_ids)} 个名为 '{field_name}' 的 FIELD 实体")
+            for fid in field_ids[:3]:  # 最多显示3个
+                logger.info(f"      - Field ID: {fid}")
 
         # 2. 构建 field_id 集合用于快速查询
         field_id_set = set(field_ids)
 
         # 3. 查询 ASSIGNED_TO 和 MOUNTED_TO 关系
+        logger.info(f"    🔗 查询 MOUNTED_TO/ASSIGNED_TO 关系...")
         field_to_func_relations = []
-        field_to_func_relations.extend(self.relations.get('ASSIGNED_TO', []))
-        field_to_func_relations.extend(self.relations.get('MOUNTED_TO', []))
-        target_function_ids = []
+        assigned_to_relations = self.relations.get('ASSIGNED_TO', [])
+        mounted_to_relations = self.relations.get('MOUNTED_TO', [])
+        field_to_func_relations.extend(assigned_to_relations)
+        field_to_func_relations.extend(mounted_to_relations)
 
-        logger.debug(f"查询 ASSIGNED_TO/MOUNTED_TO 关系，图谱中共有 {len(field_to_func_relations)} 条关系")
+        logger.info(f"    📊 图谱中共有 {len(assigned_to_relations)} 条 ASSIGNED_TO 关系")
+        logger.info(f"    📊 图谱中共有 {len(mounted_to_relations)} 条 MOUNTED_TO 关系")
+
+        target_function_ids = []
+        matched_relations = []
 
         for rel in field_to_func_relations:
             head_id = rel.get('head')
@@ -880,14 +912,18 @@ class KnowledgeGraphInterface:
             if head_id in field_id_set:
                 target_function_ids.append(tail_id)
                 rel_type = rel.get('type', 'ASSIGNED_TO')
-                logger.debug(f"  匹配到 {rel_type}: {head_id} -> {tail_id}")
+                matched_relations.append((rel_type, head_id, tail_id))
 
         if not target_function_ids:
-            logger.debug(f"未在图谱中找到字段 {field_name} 的 ASSIGNED_TO/MOUNTED_TO 关系")
+            logger.warning(f"    ✗ 未找到字段 '{field_name}' 的 MOUNTED_TO/ASSIGNED_TO 关系")
+            return []
         else:
-            logger.debug(f"在图谱中找到 {len(target_function_ids)} 个赋值目标")
+            logger.info(f"    ✓ 找到 {len(target_function_ids)} 个匹配的关系:")
+            for rel_type, head_id, tail_id in matched_relations[:5]:  # 最多显示5个
+                logger.info(f"      - {rel_type}: {head_id} → {tail_id}")
 
         # 4. 获取目标函数名
+        logger.info(f"    📝 解析目标函数名...")
         targets = []
         for func_id in target_function_ids:
             func_entity = self.entity_by_id.get(func_id)
@@ -902,10 +938,11 @@ class KnowledgeGraphInterface:
                         'method': 'llm_analysis'
                     }
                 ))
+                logger.info(f"      - 函数 ID {func_id} → {target_func_name}")
 
         if targets:
             target_names = [t[0] for t in targets]
-            logger.debug(f"✓ 从图谱找到字段 '{field_name}' 的赋值目标: {target_names}")
+            logger.info(f"    ✅ 成功找到 {len(targets)} 个异步目标函数: {target_names}")
 
         return targets
 
@@ -1357,12 +1394,20 @@ class KnowledgeGraphInterface:
 
                     # 检查是否是异步调用函数（只在直接调用时检查）
                     if not is_from_indirect and callee_name in self.async_functions:
+                        if debug:
+                            print(f"  ⚡ 触发异步调用检测: {current_name} -> {callee_name}")
+
                         # 检测异步调用关系
                         async_targets = self._detect_async_call(current_name, callee_name)
+
+                        if debug and async_targets:
+                            print(f"  ✅ 找到 {len(async_targets)} 个异步目标，添加到搜索队列")
 
                         for async_target_name, bridge_info in async_targets:
                             async_target_entity = self.find_function(async_target_name)
                             if not async_target_entity:
+                                if debug:
+                                    print(f"    ⚠️  异步目标 {async_target_name} 未在图谱中找到，跳过")
                                 continue
 
                             async_target_id = async_target_entity.get('id')
@@ -1373,7 +1418,13 @@ class KnowledgeGraphInterface:
                             # 注意：async_target 可能已经在 path 中（避免环路）
                             # 但 callee 一定不在 path 中（因为上面检查过了）
                             if not async_target_id or async_target_id in path_ids + [callee_id]:
+                                if debug:
+                                    print(f"    ⚠️  异步目标 {async_target_name} 已在路径中或无效，跳过")
                                 continue
+
+                            if debug:
+                                print(f"    ➕ 添加异步路径: {current_name} -> {callee_name} --[async]--> {async_target_name}")
+                                print(f"       桥接信息: {bridge_info.get('bridge_entity')} ({bridge_info.get('method')})")
 
                             # 添加异步调用边：current → callee → async_target
                             # 路径包含两个节点：callee 和 async_target
