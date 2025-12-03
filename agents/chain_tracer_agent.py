@@ -662,7 +662,11 @@ class CallChainTracerAgent(BaseAgent):
                     else:
                         missed_key_functions.append(key_func)
 
+            # 构建增强的路径信息
+            enriched_info = self._build_enriched_path_info(path, edges, call_lines)
+
             result_paths.append({
+                # 原有字段（保持向后兼容）
                 'path': path,
                 'edges': edges,
                 'call_lines': call_lines,
@@ -670,11 +674,14 @@ class CallChainTracerAgent(BaseAgent):
                 'score': path_info.get('score', 0),
                 'length': path_info.get('length', len(path)),
                 'indirect_count': indirect_count,
-                'avg_call_line': path_info.get('avg_call_line', 0),  # 添加平均调用行号
-                'matched_key_functions': matched_key_functions,  # 匹配到的关键函数
-                'missed_key_functions': missed_key_functions,    # 未匹配到的关键函数
+                'avg_call_line': path_info.get('avg_call_line', 0),
+                'matched_key_functions': matched_key_functions,
+                'missed_key_functions': missed_key_functions,
                 'method': 'top_k_search',
-                'success': True
+                'success': True,
+                # 新增增强字段
+                'nodes_detailed': enriched_info['nodes'],
+                'connections': enriched_info['connections']
             })
 
             logger.info(f"  路径 #{idx+1}: 长度={len(path)}, 间接调用={indirect_count}, 得分={path_info.get('score', 0)}")
@@ -699,3 +706,107 @@ class CallChainTracerAgent(BaseAgent):
             self.log_success("得分调整完成，已重新排序")
 
         return result_paths
+
+    def _get_node_detailed_info(self, func_name: str) -> Dict:
+        """
+        获取节点的详细信息（包括同名节点处理）
+
+        Args:
+            func_name: 函数名
+
+        Returns:
+            节点详细信息字典
+        """
+        # 获取所有同名函数的ID
+        all_ids = self.kg.func_name_to_ids.get(func_name, [])
+
+        if not all_ids:
+            return {
+                'name': func_name,
+                'exists': False,
+                'count': 0,
+                'entities': []
+            }
+
+        # 收集所有同名实体的详细信息（最多5个）
+        entities_info = []
+        for func_id in all_ids[:5]:  # 最多展示5个
+            entity = self.kg.entity_by_id.get(func_id)
+            if entity:
+                entities_info.append({
+                    'id': entity.get('id'),
+                    'name': entity.get('name'),
+                    'type': entity.get('type'),
+                    'source_file': entity.get('source_file'),
+                    'start_line': entity.get('start_line'),
+                    'end_line': entity.get('end_line'),
+                    'is_declaration': entity.get('is_declaration', False)
+                })
+
+        return {
+            'name': func_name,
+            'exists': True,
+            'count': len(all_ids),
+            'has_multiple': len(all_ids) > 1,
+            'entities': entities_info,
+            'note': f'在当前子图下有 {len(all_ids)} 个同名节点' if len(all_ids) > 1 else None
+        }
+
+    def _build_enriched_path_info(self, path: List[str], edges: List, call_lines: List) -> Dict:
+        """
+        构建增强的路径信息（包含详细节点信息和清晰的边信息）
+
+        Args:
+            path: 函数名列表
+            edges: 边类型列表
+            call_lines: 调用行号列表
+
+        Returns:
+            增强的路径信息
+        """
+        # 1. 构建节点详细信息
+        nodes_detailed = []
+        for func_name in path:
+            node_info = self._get_node_detailed_info(func_name)
+            nodes_detailed.append(node_info)
+
+        # 2. 构建统一的边信息（节点间的连接）
+        connections = []
+        for i in range(len(edges)):
+            from_node = path[i]
+            to_node = path[i + 1]
+            call_line = call_lines[i] if i < len(call_lines) else None
+            edge = edges[i]
+
+            # 统一的连接信息格式
+            connection = {
+                'from': from_node,
+                'to': to_node,
+                'call_line': call_line
+            }
+
+            # 判断边的类型
+            if isinstance(edge, dict):
+                edge_type = edge.get('type')
+                if edge_type == 'async':
+                    connection['type'] = 'async'
+                    connection['bridge'] = edge.get('bridge', {})
+                    connection['description'] = '异步调用'
+                elif edge_type == 'indirect':
+                    connection['type'] = 'indirect'
+                    connection['bridge'] = edge.get('bridge', {})
+                    connection['description'] = '间接调用（函数指针）'
+                else:
+                    connection['type'] = edge_type
+                    connection['bridge'] = edge.get('bridge', {})
+            else:
+                # 直接调用
+                connection['type'] = 'direct'
+                connection['description'] = '直接调用'
+
+            connections.append(connection)
+
+        return {
+            'nodes': nodes_detailed,
+            'connections': connections
+        }
