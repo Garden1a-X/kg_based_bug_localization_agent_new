@@ -663,7 +663,8 @@ class CallChainTracerAgent(BaseAgent):
                         missed_key_functions.append(key_func)
 
             # 构建增强的路径信息
-            enriched_info = self._build_enriched_path_info(path, edges, call_lines)
+            path_ids = path_info.get('path_ids', [])
+            enriched_info = self._build_enriched_path_info(path, path_ids, edges, call_lines)
 
             result_paths.append({
                 # 原有字段（保持向后兼容）
@@ -707,17 +708,52 @@ class CallChainTracerAgent(BaseAgent):
 
         return result_paths
 
-    def _get_node_detailed_info(self, func_name: str) -> Dict:
+    def _get_node_detailed_info(self, func_name: str, func_id: str = None) -> Dict:
         """
-        获取节点的详细信息（包括同名节点处理）
+        获取节点的详细信息
 
         Args:
             func_name: 函数名
+            func_id: 函数ID（可选）。如果提供，返回该ID对应的具体实体；否则返回所有同名实体
 
         Returns:
             节点详细信息字典
         """
-        # 获取所有同名函数的ID
+        # 如果提供了 func_id，返回该 ID 的具体实体
+        if func_id:
+            entity = self.kg.entity_by_id.get(func_id)
+            if not entity:
+                return {
+                    'name': func_name,
+                    'exists': False,
+                    'count': 0,
+                    'entities': []
+                }
+
+            entity_info = {
+                'id': entity.get('id'),
+                'name': entity.get('name'),
+                'type': entity.get('type'),
+                'source_file': entity.get('source_file'),
+                'start_line': entity.get('start_line'),
+                'end_line': entity.get('end_line'),
+                'is_declaration': entity.get('is_declaration', False)
+            }
+
+            # 检查是否有其他同名实体
+            all_ids = self.kg.func_name_to_ids.get(func_name, [])
+            total_count = len(all_ids)
+
+            return {
+                'name': func_name,
+                'exists': True,
+                'count': total_count,
+                'has_multiple': total_count > 1,
+                'entities': [entity_info],
+                'note': f'此处使用 ID={func_id}，共有 {total_count} 个同名' if total_count > 1 else None
+            }
+
+        # 如果没有提供 func_id，返回所有同名实体（用于步骤2的显示）
         all_ids = self.kg.func_name_to_ids.get(func_name, [])
 
         if not all_ids:
@@ -730,8 +766,8 @@ class CallChainTracerAgent(BaseAgent):
 
         # 收集所有同名实体的详细信息（最多5个）
         entities_info = []
-        for func_id in all_ids[:5]:  # 最多展示5个
-            entity = self.kg.entity_by_id.get(func_id)
+        for fid in all_ids[:5]:  # 最多展示5个
+            entity = self.kg.entity_by_id.get(fid)
             if entity:
                 entities_info.append({
                     'id': entity.get('id'),
@@ -752,22 +788,25 @@ class CallChainTracerAgent(BaseAgent):
             'note': f'在当前子图下有 {len(all_ids)} 个同名节点' if len(all_ids) > 1 else None
         }
 
-    def _build_enriched_path_info(self, path: List[str], edges: List, call_lines: List) -> Dict:
+    def _build_enriched_path_info(self, path: List[str], path_ids: List[str], edges: List, call_lines: List) -> Dict:
         """
         构建增强的路径信息（包含详细节点信息和清晰的边信息）
 
         Args:
             path: 函数名列表
+            path_ids: 函数ID列表（用于准确定位具体实体）
             edges: 边类型列表
             call_lines: 调用行号列表
 
         Returns:
             增强的路径信息
         """
-        # 1. 构建节点详细信息
+        # 1. 构建节点详细信息（使用 path_ids 获取准确实体）
         nodes_detailed = []
-        for func_name in path:
-            node_info = self._get_node_detailed_info(func_name)
+        for i, func_name in enumerate(path):
+            # 使用对应的 ID 获取准确的实体信息
+            func_id = path_ids[i] if i < len(path_ids) else None
+            node_info = self._get_node_detailed_info(func_name, func_id)
             nodes_detailed.append(node_info)
 
         # 2. 构建统一的边信息（节点间的连接）

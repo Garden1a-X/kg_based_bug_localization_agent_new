@@ -1328,6 +1328,7 @@ class KnowledgeGraphInterface:
 
                     found_paths.append({
                         'path': path_names,
+                        'path_ids': path_ids,  # 添加 ID 列表，用于准确定位实体
                         'edges': edge_types,
                         'call_lines': call_lines,
                         'score': score,

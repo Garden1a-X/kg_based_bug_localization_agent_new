@@ -349,13 +349,13 @@ class MasterCoordinator:
         console.print(table)
         console.print()
     
-    def _truncate_path(self, path: str, max_levels: int = 3) -> str:
+    def _truncate_path(self, path: str, max_levels: int = 5) -> str:
         """
         截断文件路径，只保留最后几层
 
         Args:
             path: 完整路径
-            max_levels: 保留的层级数
+            max_levels: 保留的层级数（默认5层，比如 .../drivers/mmc/core/core.c）
 
         Returns:
             截断后的路径
@@ -948,15 +948,15 @@ class MasterCoordinator:
                 if i < len(nodes_detailed):
                     node_detail = nodes_detailed[i]
                     if node_detail.get('exists') and node_detail.get('entities'):
-                        # 取第一个实体的文件路径
+                        # 取第一个实体的文件路径（这是路径中使用的具体实体）
                         entity = node_detail['entities'][0]
                         source_file = entity.get('source_file', 'N/A')
                         if source_file != 'N/A':
                             truncated = self._truncate_path(source_file)
                             file_info = f" [dim]@ {truncated}[/dim]"
-                        # 如果有多个同名实体，添加提示
+                        # 如果有多个同名实体，添加一个小标记（不显示数量，因为这条路径用的是确定的那个）
                         if node_detail.get('count', 1) > 1:
-                            file_info += f" [dim](+{node_detail['count']-1}个同名)[/dim]"
+                            file_info += f" [dim]†[/dim]"  # † 符号表示有同名实体
 
                 if is_bridge:
                     # 找到桥接类型
