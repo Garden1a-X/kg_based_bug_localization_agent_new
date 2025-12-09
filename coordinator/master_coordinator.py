@@ -349,23 +349,94 @@ class MasterCoordinator:
         console.print(table)
         console.print()
     
+    def _truncate_path(self, path: str, max_levels: int = 3) -> str:
+        """
+        截断文件路径，只保留最后几层
+
+        Args:
+            path: 完整路径
+            max_levels: 保留的层级数
+
+        Returns:
+            截断后的路径
+        """
+        if not path or path == 'N/A':
+            return path
+
+        parts = path.replace('\\', '/').split('/')
+        if len(parts) <= max_levels:
+            return path
+
+        # 保留最后 max_levels 层，前面用 ... 表示
+        truncated = '.../'.join([''] + parts[-max_levels:])
+        return truncated
+
     def _display_entities(self, entities: Dict):
         """显示实体定位结果"""
         table = Table(title="实体定位结果")
         table.add_column("实体", style="cyan")
         table.add_column("函数名", style="green")
-        table.add_column("文件", style="yellow")
-        
+        table.add_column("文件路径", style="yellow", overflow="fold")
+        table.add_column("数量", style="magenta")
+
+        # 显示起点
         if entities.get('start_entity'):
-            table.add_row("起点", 
-                         entities['start_entity']['name'],
-                         entities['start_entity'].get('file', 'N/A'))
-        
+            start_name = entities['start_entity']['name']
+            # 查询所有同名起点
+            all_start_ids = self.kg.func_name_to_ids.get(start_name, [])
+
+            if len(all_start_ids) > 1:
+                # 多个同名实体，显示所有（最多5个）
+                file_paths = []
+                for func_id in all_start_ids[:5]:
+                    entity = self.kg.entity_by_id.get(func_id)
+                    if entity:
+                        source_file = entity.get('source_file', entity.get('file', 'N/A'))
+                        truncated = self._truncate_path(source_file)
+                        file_paths.append(truncated)
+
+                files_display = '\n'.join(file_paths)
+                count_display = f"{len(all_start_ids)} 个同名"
+                if len(all_start_ids) > 5:
+                    files_display += f"\n... 还有 {len(all_start_ids) - 5} 个"
+
+                table.add_row("起点", start_name, files_display, count_display)
+            else:
+                # 单个实体
+                source_file = entities['start_entity'].get('file',
+                                entities['start_entity'].get('source_file', 'N/A'))
+                truncated = self._truncate_path(source_file)
+                table.add_row("起点", start_name, truncated, "1 个")
+
+        # 显示终点
         if entities.get('end_entity'):
-            table.add_row("终点",
-                         entities['end_entity']['name'],
-                         entities['end_entity'].get('file', 'N/A'))
-        
+            end_name = entities['end_entity']['name']
+            # 查询所有同名终点
+            all_end_ids = self.kg.func_name_to_ids.get(end_name, [])
+
+            if len(all_end_ids) > 1:
+                # 多个同名实体，显示所有（最多5个）
+                file_paths = []
+                for func_id in all_end_ids[:5]:
+                    entity = self.kg.entity_by_id.get(func_id)
+                    if entity:
+                        source_file = entity.get('source_file', entity.get('file', 'N/A'))
+                        truncated = self._truncate_path(source_file)
+                        file_paths.append(truncated)
+
+                files_display = '\n'.join(file_paths)
+                count_display = f"{len(all_end_ids)} 个同名"
+                if len(all_end_ids) > 5:
+                    files_display += f"\n... 还有 {len(all_end_ids) - 5} 个"
+
+                table.add_row("终点", end_name, files_display, count_display)
+            else:
+                # 单个实体
+                source_file = entities['end_entity'].get('file',
+                                entities['end_entity'].get('source_file', 'N/A'))
+                truncated = self._truncate_path(source_file)
+                table.add_row("终点", end_name, truncated, "1 个")
+
         console.print(table)
         console.print()
     
@@ -853,6 +924,9 @@ class MasterCoordinator:
             title += ")"
             console.print(title)
 
+            # 获取节点详细信息（包含文件路径）
+            nodes_detailed = path_result.get('nodes_detailed', [])
+
             # 显示路径
             for i, func in enumerate(path):
                 # 检查是否是断点修复的位置
@@ -869,6 +943,21 @@ class MasterCoordinator:
                     if call_line:
                         call_line_info = f" [dim](line {call_line})[/dim]"
 
+                # 获取文件路径信息
+                file_info = ""
+                if i < len(nodes_detailed):
+                    node_detail = nodes_detailed[i]
+                    if node_detail.get('exists') and node_detail.get('entities'):
+                        # 取第一个实体的文件路径
+                        entity = node_detail['entities'][0]
+                        source_file = entity.get('source_file', 'N/A')
+                        if source_file != 'N/A':
+                            truncated = self._truncate_path(source_file)
+                            file_info = f" [dim]@ {truncated}[/dim]"
+                        # 如果有多个同名实体，添加提示
+                        if node_detail.get('count', 1) > 1:
+                            file_info += f" [dim](+{node_detail['count']-1}个同名)[/dim]"
+
                 if is_bridge:
                     # 找到桥接类型
                     bridge_type = "桥接"
@@ -879,15 +968,15 @@ class MasterCoordinator:
                             break
                     # 间接调用用黄色，如果同时是关键函数也标注
                     if is_key_function:
-                        console.print(f"  {i}. [yellow]{func}[/yellow] ({bridge_type}) [cyan]✓关键函数[/cyan]{call_line_info}")
+                        console.print(f"  {i}. [yellow]{func}[/yellow] ({bridge_type}) [cyan]✓关键函数[/cyan]{call_line_info}{file_info}")
                     else:
-                        console.print(f"  {i}. [yellow]{func}[/yellow] ({bridge_type}){call_line_info}")
+                        console.print(f"  {i}. [yellow]{func}[/yellow] ({bridge_type}){call_line_info}{file_info}")
                 else:
                     # 关键函数用青色高亮
                     if is_key_function:
-                        console.print(f"  {i}. [cyan]{func} ✓[/cyan]{call_line_info}")
+                        console.print(f"  {i}. [cyan]{func} ✓[/cyan]{call_line_info}{file_info}")
                     else:
-                        console.print(f"  {i}. {func}{call_line_info}")
+                        console.print(f"  {i}. {func}{call_line_info}{file_info}")
 
             # 显示未经过的关键函数
             if missed_key_functions:
