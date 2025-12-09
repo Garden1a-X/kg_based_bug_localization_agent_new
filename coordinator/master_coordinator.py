@@ -368,7 +368,7 @@ class MasterCoordinator:
             return path
 
         # 保留最后 max_levels 层，前面用 ... 表示
-        truncated = '.../'.join([''] + parts[-max_levels:])
+        truncated = '.../' + '/'.join(parts[-max_levels:])
         return truncated
 
     def _display_entities(self, entities: Dict):
