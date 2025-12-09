@@ -408,6 +408,10 @@ class MasterCoordinator:
                 truncated = self._truncate_path(source_file)
                 table.add_row("起点", start_name, truncated, "1 个")
 
+        # 添加分隔行（起点和终点之间）
+        if entities.get('start_entity') and entities.get('end_entity'):
+            table.add_row("", "", "", "", end_section=True)  # 添加分隔线
+
         # 显示终点
         if entities.get('end_entity'):
             end_name = entities['end_entity']['name']
@@ -941,7 +945,7 @@ class MasterCoordinator:
                 if 'call_lines' in path_result and i > 0:
                     call_line = path_result['call_lines'][i-1]
                     if call_line:
-                        call_line_info = f" [dim](line {call_line})[/dim]"
+                        call_line_info = f" [dim](call line {call_line})[/dim]"
 
                 # 获取文件路径信息
                 file_info = ""
@@ -957,6 +961,12 @@ class MasterCoordinator:
                         # 如果有多个同名实体，添加一个小标记（不显示数量，因为这条路径用的是确定的那个）
                         if node_detail.get('count', 1) > 1:
                             file_info += f" [dim]†[/dim]"  # † 符号表示有同名实体
+
+                        # 添加函数的真实行号范围
+                        start_line = entity.get('start_line')
+                        end_line = entity.get('end_line')
+                        if start_line and end_line:
+                            file_info += f" [dim][{start_line}-{end_line}][/dim]"
 
                 if is_bridge:
                     # 找到桥接类型
