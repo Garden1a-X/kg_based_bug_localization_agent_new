@@ -39,7 +39,7 @@ class IoctlMapperAgent:
     # 公共入口
     # ──────────────────────────────────────────────────────────────
 
-    def run(self, max_sites: int = 0) -> Dict[str, Any]:
+    def run(self, max_sites: int = 0, path_prefix: str = "") -> Dict[str, Any]:
         """
         执行完整映射流程。
 
@@ -61,12 +61,13 @@ class IoctlMapperAgent:
         call_sites = self.kg.query_ioctl_call_sites()
         logger.info(f"  找到 {len(call_sites)} 个调用点")
 
-        # 只关心 drivers/ 下的调用点
-        call_sites = [
-            s for s in call_sites
-            if '/drivers/' in s.get('caller_file', '').replace('\\', '/')
-        ]
-        logger.info(f"  drivers/ 下调用点: {len(call_sites)} 个")
+        if path_prefix:
+            prefix = path_prefix.replace('\\', '/')
+            call_sites = [
+                s for s in call_sites
+                if prefix in s.get('caller_file', '').replace('\\', '/')
+            ]
+            logger.info(f"  过滤 '{prefix}' 后调用点: {len(call_sites)} 个")
 
         if max_sites > 0:
             call_sites = call_sites[:max_sites]

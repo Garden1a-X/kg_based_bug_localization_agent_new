@@ -39,6 +39,8 @@ def parse_args():
     p.add_argument("--llm-host", default="http://localhost:11434")
     p.add_argument("--max-sites", type=int, default=5,
                    help="测试处理的调用点数量（默认 5）")
+    p.add_argument("--path-prefix", default=None,
+                   help="只处理 caller_file 包含此前缀的调用点，如 /drivers/（默认不过滤）")
     return p.parse_args()
 
 
@@ -144,13 +146,16 @@ def main():
     for i, s in enumerate(sample):
         print(f"  [{i}] {s['caller_name']}  @ {s['caller_file']}:{s.get('call_line','?')}")
 
-    # 只保留 drivers/ 下的调用点（面向驱动代码的下游任务）
-    driver_sites = [
-        s for s in call_sites
-        if '/drivers/' in s.get('caller_file', '').replace('\\', '/')
-    ]
-    print(f"\n  → 其中 drivers/ 下: {len(driver_sites)} 个")
-    sites_to_process = driver_sites[:args.max_sites]
+    if args.path_prefix:
+        prefix = args.path_prefix.replace('\\', '/')
+        filtered = [
+            s for s in call_sites
+            if prefix in s.get('caller_file', '').replace('\\', '/')
+        ]
+        print(f"\n  → 过滤 '{prefix}': {len(filtered)} 个")
+    else:
+        filtered = call_sites
+    sites_to_process = filtered[:args.max_sites]
     print(f"  → 本次处理前 {len(sites_to_process)} 个")
 
     # ── Step 3: 查询 fops handler 候选 ──────────────────────────
