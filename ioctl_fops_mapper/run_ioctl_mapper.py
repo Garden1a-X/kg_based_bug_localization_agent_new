@@ -73,15 +73,12 @@ def parse_path_mapping(mapping_str: str) -> dict:
     result = {}
     for pair in mapping_str.split(','):
         pair = pair.strip()
-        if ':' in pair:
-            # 考虑 Windows 路径中可能有驱动器字母冒号，只按最后一个冒号之前的最长部分分割
-            # 简单策略：按第一个冒号后紧跟 / 或 \ 的位置分割
-            idx = pair.find('/', 1)
-            colon_before = pair.rfind(':', 0, idx) if idx > 0 else pair.find(':')
-            if colon_before >= 0:
-                old = pair[:colon_before]
-                new = pair[colon_before + 1:]
-                result[old] = new
+        # 用 ':/' 作分隔符，兼容 Linux 绝对路径（不含 Windows 驱动器号）
+        sep_idx = pair.find(':/')
+        if sep_idx > 0:
+            old = pair[:sep_idx]
+            new = pair[sep_idx + 1:]
+            result[old] = new
     return result
 
 

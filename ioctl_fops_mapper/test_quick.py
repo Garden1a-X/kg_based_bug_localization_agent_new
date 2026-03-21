@@ -46,10 +46,10 @@ def parse_path_mapping(s):
     result = {}
     for pair in s.split(','):
         pair = pair.strip()
-        idx = pair.find('/', 1)
-        colon = pair.rfind(':', 0, idx) if idx > 0 else pair.find(':')
-        if colon >= 0:
-            result[pair[:colon]] = pair[colon + 1:]
+        # 用 ':/' 作分隔符，兼容 Linux 绝对路径（不含 Windows 驱动器号）
+        sep_idx = pair.find(':/')
+        if sep_idx > 0:
+            result[pair[:sep_idx]] = pair[sep_idx + 1:]
     return result
 
 
