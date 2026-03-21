@@ -29,6 +29,8 @@ def parse_args():
     p.add_argument("--kg-data-dir", required=True)
     p.add_argument("--path-mapping", default=None,
                    help="旧前缀:新前缀，多个用逗号分隔")
+    p.add_argument("--check-path", default=None,
+                   help="只检查路径映射，不加载 KG（传一个 KG 原始路径验证映射是否正确）")
     p.add_argument("--llm-backend", required=True,
                    choices=["openai", "ollama", "local"])
     p.add_argument("--llm-base-url", default=None)
@@ -66,6 +68,33 @@ def main():
 
     args = parse_args()
     path_mappings = parse_path_mapping(args.path_mapping)
+
+    # ── 路径映射快速检查（--check-path 时只跑这一步）─────────────
+    sep("路径映射诊断")
+    print(f"  原始参数: {args.path_mapping}")
+    print(f"  解析结果: {path_mappings}")
+    if path_mappings:
+        for old, new in path_mappings.items():
+            print(f"  映射规则: '{old}'  →  '{new}'")
+            if os.path.isdir(new):
+                print(f"           目标目录存在 ✓")
+            else:
+                print(f"           目标目录不存在 ✗  ({new})")
+    else:
+        print("  ✗ 路径映射解析为空！检查 --path-mapping 格式是否为 /旧前缀:/新前缀")
+
+    if args.check_path:
+        test_path = args.check_path
+        remapped = test_path
+        for old, new in path_mappings.items():
+            if test_path.startswith(old):
+                remapped = new + test_path[len(old):]
+                break
+        print(f"\n  测试路径: {test_path}")
+        print(f"  重映射后: {remapped}")
+        print(f"  文件存在: {'✓' if os.path.isfile(remapped) else '✗'}")
+        print()
+        return  # 只检查路径，不继续
 
     # ── Step 0: LLM 连通性 ──────────────────────────────────────
     sep("Step 0: LLM 连通性检查")
