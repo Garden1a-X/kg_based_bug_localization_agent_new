@@ -236,13 +236,26 @@ class IoctlMapperAgent:
                          f"[{site.get('caller_start')}-{site.get('caller_end')}]")
             return None, {"reason": "no_source"}
 
-        # 2. 过滤候选（按目录接近度取 top-N）
-        candidates = self._filter_candidates(site, all_handlers)
+        # 2. Phase 1：LLM 分析调用上下文，推断子系统/方向（不提供候选）
+        analysis = self.llm.analyze_ioctl_for_retrieval(
+            caller_source=caller_source,
+            call_line=call_line,
+            caller_file=caller_file,
+        )
+        if analysis:
+            logger.debug(
+                f"Phase1: subsystem={analysis.get('subsystem')}, "
+                f"hints={analysis.get('driver_dir_hints')}, "
+                f"guess={analysis.get('fops_name_guess')}"
+            )
+
+        # 3. 智能候选召回（语义匹配优先 + 路径接近度兜底）
+        candidates = self._smart_filter_candidates(site, all_handlers, analysis)
         if not candidates:
             logger.debug(f"无候选 fops: {caller_name} @ {caller_file}")
             return None, {"reason": "no_candidates"}
 
-        # 3. LLM 选 fops 变量
+        # 4. Phase 2：LLM 从候选中选出最匹配的 fops 变量
         llm_result = self.llm.select_fops_var(
             caller_source=caller_source,
             call_line=call_line,
@@ -361,6 +374,76 @@ class IoctlMapperAgent:
 
         scored = sorted(all_handlers, key=depth, reverse=True)
         return scored[:self.MAX_CANDIDATES]
+
+    def _smart_filter_candidates(
+        self,
+        site: Dict[str, Any],
+        all_handlers: List[Dict[str, Any]],
+        analysis: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        两阶段候选召回：
+        1. 用 Phase 1 LLM 分析结果做语义召回
+           a. fops_name_guess 精确/模糊名字匹配
+           b. driver_dir_hints 关键词过滤源文件路径
+        2. 路径接近度兜底，填满 MAX_CANDIDATES
+
+        召回顺序决定 LLM 最终看到的 top-3，语义匹配结果排在前面。
+        """
+        seen: set = set()
+        result: List[Dict] = []
+
+        def add(h: Dict) -> None:
+            key = h.get('fops_var', '') + '|' + h.get('source_file', '')
+            if key not in seen:
+                seen.add(key)
+                result.append(h)
+
+        if analysis:
+            # 1a. 名字猜测：先精确匹配，再前缀/包含匹配
+            name_guess = (analysis.get('fops_name_guess') or '').strip().lower()
+            if name_guess and name_guess != 'null':
+                for h in all_handlers:
+                    if h.get('fops_var', '').lower() == name_guess:
+                        add(h)
+                # 精确匹配没找到才做模糊
+                if not result:
+                    for h in all_handlers:
+                        if name_guess in h.get('fops_var', '').lower():
+                            add(h)
+
+            # 1b. driver_dir_hints：关键词过滤源文件路径
+            hints = [kw.lower() for kw in (analysis.get('driver_dir_hints') or [])
+                     if kw and kw.lower() != 'null']
+            if hints:
+                for h in all_handlers:
+                    src = h.get('source_file', '').lower()
+                    if any(kw in src for kw in hints):
+                        add(h)
+
+        # 2. 路径接近度兜底，填满 MAX_CANDIDATES
+        rel_caller = self._to_relative_path(site.get('caller_file', ''))
+        site_parts = rel_caller.split('/')
+
+        def depth(h: Dict) -> int:
+            h_parts = h.get('source_file', '').replace('\\', '/').split('/')
+            d = 0
+            for a, b in zip(site_parts, h_parts):
+                if a == b:
+                    d += 1
+                else:
+                    break
+            return d
+
+        remaining = [h for h in all_handlers
+                     if (h.get('fops_var', '') + '|' + h.get('source_file', '')) not in seen]
+        remaining.sort(key=depth, reverse=True)
+        for h in remaining:
+            if len(result) >= self.MAX_CANDIDATES:
+                break
+            add(h)
+
+        return result[:self.MAX_CANDIDATES]
 
     def _find_handler_id(self, handler_func: str, source_file: str) -> Optional[str]:
         """

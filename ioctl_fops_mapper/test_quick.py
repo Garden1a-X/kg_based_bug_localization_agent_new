@@ -212,13 +212,27 @@ def main():
             continue
         print(f"    ✓ 源码读取成功（{src.count(chr(10))} 行）")
 
-        # 过滤候选
-        candidates = agent._filter_candidates(site, all_handlers)
+        # Phase 1: LLM 分析上下文，推断子系统/方向（不提供候选）
+        analysis = llm.analyze_ioctl_for_retrieval(
+            caller_source=src,
+            call_line=site.get('call_line'),
+            caller_file=site['caller_file'],
+        )
+        if analysis:
+            print(f"    Phase1: subsystem={analysis.get('subsystem')}  "
+                  f"hints={analysis.get('driver_dir_hints')}  "
+                  f"guess={analysis.get('fops_name_guess')}  "
+                  f"conf={analysis.get('confidence')}/10")
+        else:
+            print(f"    Phase1: 分析失败，降级为路径接近度")
+
+        # 智能候选召回（语义匹配优先 + 路径接近度兜底）
+        candidates = agent._smart_filter_candidates(site, all_handlers, analysis)
         print(f"    候选 fops 数: {len(candidates)}")
         if candidates:
             print(f"    top-3 候选: {[c['fops_var'] for c in candidates[:3]]}")
 
-        # LLM 选 fops 变量
+        # Phase 2: LLM 从候选中选出最匹配的 fops 变量
         llm_result = llm.select_fops_var(
             caller_source=src,
             call_line=site.get('call_line'),

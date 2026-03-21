@@ -323,6 +323,69 @@ ioctl 调用分析：
             logger.error(f"match_fops_candidate 失败: {e}")
             return None
 
+    def analyze_ioctl_for_retrieval(
+        self,
+        caller_source: str,
+        call_line: Optional[int],
+        caller_file: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Phase 1：不提供候选，让 LLM 从代码上下文推断子系统/驱动方向，
+        返回的结果用于后续智能候选召回（关键词过滤 + 名字猜测）。
+
+        Returns:
+            {
+                "subsystem":        "nitro_enclaves",
+                "driver_dir_hints": ["nitro_enclaves", "virt"],
+                "fops_name_guess":  "ne_fops",   # 或 null
+                "confidence":       0~10,
+                "reasoning":        "..."
+            }
+            失败返回 None
+        """
+        if not self.is_available():
+            return None
+
+        call_hint = f"（第 {call_line} 行是 ioctl() 调用）" if call_line else ""
+
+        prompt = f"""你是 Linux 内核专家。以下是一段包含 ioctl() 调用的 C 代码{call_hint}。
+
+调用文件路径：{caller_file}
+
+代码上下文：
+```c
+{caller_source[:3000]}
+```
+
+请分析该 ioctl() 调用属于哪个 Linux 内核子系统/驱动，以便在内核源码中定位对应的 file_operations 结构体。
+
+分析步骤（优先级从高到低）：
+1. **ioctl 命令宏前缀**：命令宏（如 NE_CREATE_VM、KVM_RUN、VHOST_SET_MEM_TABLE）的前缀直接指向所属子系统
+2. **fd 来源**：open() 打开的设备路径（如 /dev/nitro_enclaves → nitro_enclaves 驱动）
+3. **调用文件目录**：caller 文件所在目录（如 samples/nitro_enclaves/ → nitro_enclaves）
+
+以 JSON 格式回答（不要其他说明）：
+{{
+  "subsystem": "最可能的子系统名（单个），如 nitro_enclaves、kvm、drm、vhost",
+  "driver_dir_hints": ["用于过滤 fops 源文件路径的关键词，3个以内，如 nitro_enclaves、virt、kvm"],
+  "fops_name_guess": "猜测的 fops 变量名，如 ne_fops、kvm_fops，不确定填 null",
+  "confidence": 0到10的整数,
+  "reasoning": "简短推理"
+}}"""
+
+        try:
+            response = self.complete(
+                prompt=prompt,
+                system_prompt="你是一个 Linux 内核代码分析专家，擅长 ioctl 调用路径分析。",
+                temperature=0.1,
+                max_tokens=300,
+                timeout=60,
+            )
+            return self._parse_json_response(response)
+        except Exception as e:
+            logger.error(f"analyze_ioctl_for_retrieval 失败: {e}")
+            return None
+
     def select_fops_var(
         self,
         caller_source: str,
