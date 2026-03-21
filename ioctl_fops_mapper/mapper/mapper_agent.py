@@ -229,10 +229,10 @@ class IoctlMapperAgent:
         """
         基于 KG 中 fops 来源目录与 ioctl 调用点目录的精确匹配。
 
-        策略：
-        - 只考虑 source="kg" 的条目
-        - 提取调用点的驱动目录，与 fops handler 的 source_file 目录做最长公共前缀匹配
-        - 若唯一最佳匹配的目录深度 >= 2，则认为匹配成功
+        策略（优先级从高到低）：
+        1. 路径完全相同目录的唯一匹配
+        2. 最长公共目录前缀的唯一匹配（depth >= 2）
+        3. 同深度歧义时：用 ioctl 命令前缀 vs fops_var/handler 名称做二级匹配
         """
         kg_entries = [e for e in fops_entries if e.source == "kg"]
         if not kg_entries:
@@ -261,16 +261,24 @@ class IoctlMapperAgent:
         if best_depth < 2:
             return None
 
-        # 检查是否有并列最优（同分多个 handler），此时无法确定，交给 heuristic 或 LLM
         top_entries = [e for d, e in scored if d == best_depth]
-        if len(top_entries) > 1:
-            # 多个同级别候选，选 source_file 目录与 site_dir 完全相同的优先
-            exact = [e for e in top_entries if e.source_file.replace('\\', '/').rsplit('/', 1)[0] == site_dir]
+        if len(top_entries) == 1:
+            pass  # 唯一最佳
+        else:
+            # 同深度歧义：先尝试精确目录匹配
+            exact = [e for e in top_entries
+                     if e.source_file.replace('\\', '/').rsplit('/', 1)[0] == site_dir]
             if len(exact) == 1:
                 best = exact[0]
             else:
-                # 仍然有歧义，返回 None 交给 heuristic
-                return None
+                # 二级判断：用 ioctl 命令宏前缀 vs fops_var/handler_func 名称做关键词匹配
+                cmd_best = self._disambiguate_by_cmd_prefix(
+                    site, exact if exact else top_entries
+                )
+                if cmd_best is None:
+                    # 仍然无法区分，交给 heuristic
+                    return None
+                best = cmd_best
 
         return {
             "call_site": site.to_dict(),
@@ -285,6 +293,56 @@ class IoctlMapperAgent:
             "method": "kg_dir_match",
             "reasoning": f"KG驱动目录匹配（公共路径深度={best_depth}，handler={best.handler_func}）",
         }
+
+    @staticmethod
+    def _disambiguate_by_cmd_prefix(
+        site: IoctlCallSite,
+        candidates: List[FopsEntry],
+    ) -> Optional[FopsEntry]:
+        """
+        当路径无法区分多个候选时，从 ioctl 命令宏中提取前缀，
+        与 fops_var / handler_func 做关键词匹配。
+
+        例如：
+          line_content = "ret = ioctl(fd, FW_MGMT_IOC_GET_INTF_FW, ...)"
+            → 命令前缀 tokens: ["fw", "mgmt"]
+            → 匹配 fops_var="fw_mgmt_fops" > "cap_fops"
+
+          line_content = "ret = ioctl(fd, CAP_IOC_AUTHENTICATE, ...)"
+            → 命令前缀 tokens: ["cap"]
+            → 匹配 fops_var="cap_fops" > "fw_mgmt_fops"
+        """
+        import re as _re
+
+        # 从 ioctl(fd, CMD_MACRO, ...) 提取第二个参数（命令宏）
+        m = _re.search(r'\bioctl\s*\(\s*\w+\s*,\s*(\w+)', site.line_content)
+        if not m:
+            return None
+        cmd_macro = m.group(1).lower()  # e.g. "fw_mgmt_ioc_get_intf_fw"
+
+        # 取 _IOC 之前的部分作为驱动标识前缀
+        ioc_idx = cmd_macro.find('_ioc')
+        cmd_prefix = cmd_macro[:ioc_idx] if ioc_idx > 0 else cmd_macro
+        # 拆成 token 列表，例如 "fw_mgmt" → ["fw", "mgmt"]
+        cmd_tokens = [t for t in cmd_prefix.split('_') if t]
+
+        if not cmd_tokens:
+            return None
+
+        def score_entry(entry: FopsEntry) -> int:
+            target = (entry.fops_var + ' ' + entry.handler_func).lower()
+            return sum(1 for t in cmd_tokens if t in target)
+
+        scored = [(score_entry(e), e) for e in candidates]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        best_score, best = scored[0]
+        if best_score == 0:
+            return None
+
+        # 检查是否唯一最高分
+        top = [e for s, e in scored if s == best_score]
+        return top[0] if len(top) == 1 else None
 
     def _resolve_heuristic(
         self,
