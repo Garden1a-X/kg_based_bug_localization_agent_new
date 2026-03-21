@@ -144,8 +144,14 @@ def main():
     for i, s in enumerate(sample):
         print(f"  [{i}] {s['caller_name']}  @ {s['caller_file']}:{s.get('call_line','?')}")
 
-    sites_to_process = call_sites[:args.max_sites]
-    print(f"\n  → 本次处理前 {len(sites_to_process)} 个")
+    # 只保留 drivers/ 下的调用点（面向驱动代码的下游任务）
+    driver_sites = [
+        s for s in call_sites
+        if '/drivers/' in s.get('caller_file', '').replace('\\', '/')
+    ]
+    print(f"\n  → 其中 drivers/ 下: {len(driver_sites)} 个")
+    sites_to_process = driver_sites[:args.max_sites]
+    print(f"  → 本次处理前 {len(sites_to_process)} 个")
 
     # ── Step 3: 查询 fops handler 候选 ──────────────────────────
     sep("Step 3: 查询 fops → ioctl handler 候选")
