@@ -110,7 +110,6 @@ def main():
     for etype, lst in sorted(E.items(), key=lambda x: -len(x[1])):
         all_keys = sorted({k for e in lst for k in e if k != '_t'})
         print(f"  {etype:20s} {len(lst):7d} 个  字段: {all_keys}")
-        print(f"  例:{fmt_entity(lst[0])}")
 
     # ── 2. 关系类型统计 + 1个例子 + head→tail类型 ────────────────────
     print("\n【关系类型】")
@@ -122,7 +121,6 @@ def main():
             pairs[f"{h}→{t}"] += 1
         top_pairs = ', '.join(f"{p}:{c}" for p,c in sorted(pairs.items(), key=lambda x:-x[1])[:3])
         print(f"  {rtype:25s} {len(lst):7d} 条  [{top_pairs}]")
-        print(f"  例:{fmt_rel(lst[0], ID)}")
 
     # ── 3. FUNCTION 字段覆盖率 ────────────────────────────────────────
     funcs = E.get('FUNCTION', [])
