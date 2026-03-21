@@ -173,16 +173,15 @@ def main():
     # ── Step 3: 查询 fops handler 候选 ──────────────────────────
     sep("Step 3: 查询 fops → ioctl handler 候选")
     all_handlers = kg.query_fops_ioctl_handlers()
-    print(f"✓ 共找到 {len(all_handlers)} 个 handler 候选")
+    print(f"✓ 共找到 {len(all_handlers)} 个 fops → ioctl handler 映射")
 
     if not all_handlers:
         print("✗ 无候选，检查 KG 是否包含 ASSIGNED_TO 关系且 handler 名含 'ioctl'")
         sys.exit(1)
 
-    print(f"\n  前 3 个样例:")
-    for h in all_handlers[:3]:
-        print(f"    {h['fops_var']}.unlocked_ioctl = {h['handler_func']}"
-              f"  ({h['source_file']})")
+    print(f"\n  全部 fops 列表（{len(all_handlers)} 条）:")
+    for h in all_handlers:
+        print(f"    [{h['driver_dir']}]  {h['fops_var']}.unlocked_ioctl = {h['handler_func']}")
 
     # ── Step 4: 逐条解析（带详细输出）───────────────────────────
     sep(f"Step 4: LLM 解析（处理 {len(sites_to_process)} 个调用点）")

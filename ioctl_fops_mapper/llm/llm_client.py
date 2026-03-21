@@ -149,10 +149,11 @@ ioctl() 的执行路径由 fd 背后的 file_operations 结构体决定：
   fd = open("/dev/xxx", ...) → 内核根据设备类型找到对应驱动的 file_operations
   → 调用 file_operations.unlocked_ioctl
 
-你的任务：
-1. 分析代码，判断 fd 是通过 open() 打开了哪种设备（设备路径、命令宏前缀、函数语义等）
-2. 从下方候选 file_operations 列表中，选出负责处理该设备 ioctl 的那个 fops
-3. 若列表中没有合适的，填 -1
+判断步骤（优先级从高到低）：
+1. **ioctl 命令宏前缀**（最强信号）：命令宏如 FOO_IOC_BAR 中的 FOO_IOC 前缀
+   直接指向定义这些宏的驱动/子系统，应在候选 fops 的 driver_dir 或 fops_var 中寻找对应
+2. **fd 来源**：open() 打开的设备路径（如 /dev/gb-fw-mgmt-0 → greybus fw-mgmt 驱动）
+3. **调用文件目录**：调用文件所在目录暗示其操作的子系统
 
 调用文件路径：{caller_file}
 
@@ -164,11 +165,14 @@ ioctl() 的执行路径由 fd 背后的 file_operations 结构体决定：
 候选 file_operations 列表（每项来自内核源码中 .unlocked_ioctl 的注册）：
 {candidates_str}
 
+注意：若候选列表中确实不存在匹配的 fops（相关驱动不在候选中），请直接填 -1，
+不要强行选一个不相关的。
+
 以 JSON 格式回答（不要其他说明）：
 {{
   "selected_index": 0到{len(candidates)-1}的整数，无合适匹配填 -1,
   "confidence": 0到10的整数,
-  "reasoning": "先说明 fd 对应什么设备/驱动，再说为什么选这个 fops"
+  "reasoning": "先说命令宏前缀指向哪个子系统，再说 fd 来源，最后说为何选或不选某个 fops"
 }}"""
 
         try:
