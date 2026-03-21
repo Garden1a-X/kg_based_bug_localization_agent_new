@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """
-run_ioctl_mapper.py — ioctl 调用映射入口（KG-first + LLM-driven 版本）
+run_ioctl_mapper.py — ioctl 调用映射入口
 
-call site 和 handler 均来自 KG，确保头尾都在图谱里。
-LLM 主导选择，KG 提供代码上下文和候选列表。
+call site 来源（二选一）：
+  1. 源码扫描（推荐）：提供 --linux-src，扫描 '= ioctl(' 赋值调用形式
+  2. KG 查询（兜底）：不提供 --linux-src，从 KG CALLS 边查找
 
 用法示例：
 
+  # 源码扫描模式（推荐）
   python run_ioctl_mapper.py \\
       --kg-data-dir /data/xuao/code_kg/data/linux \\
-      --path-mapping /mnt/afs/liyuekeng/workspace/data/linux-5.10:/data/xuao/code_kg/data/linux_data \\
+      --linux-src /data/xuao/code_kg/data/linux_data \\
+      --path-prefix tools/testing \\
       --llm-backend openai \\
       --llm-base-url http://10.x.x.x:8502 \\
       --llm-model gpt-4o-mini \\
       --output output/ioctl_mappings.json
 
-  # 快速测试（只处理前 20 个调用点）
+  # KG 模式（兼容旧用法）
   python run_ioctl_mapper.py \\
       --kg-data-dir /data/xuao/code_kg/data/linux \\
-      --path-mapping /mnt/afs/.../linux-5.10:/data/xuao/code_kg/data/linux_data \\
+      --path-mapping /mnt/afs/liyuekeng/workspace/data/linux-5.10:/data/xuao/code_kg/data/linux_data \\
       --llm-backend ollama --llm-model qwen3:4b \\
       --max-sites 20 \\
       --output output/test.json
@@ -55,6 +58,12 @@ def parse_args():
     parser.add_argument("--llm-model", default="gpt-4o-mini")
     parser.add_argument("--llm-host", default="http://localhost:11434",
                         help="Ollama host")
+
+    # 源码扫描模式（推荐）
+    parser.add_argument("--linux-src", default=None,
+                        help="Linux 源码根目录；提供时用源码扫描 '= ioctl(' 找调用点")
+    parser.add_argument("--path-prefix", default=None,
+                        help="只扫/过滤此子目录，如 tools/testing（源码扫描时为子目录，KG 模式时为路径过滤）")
 
     # 运行控制
     parser.add_argument("--max-sites", type=int, default=0,
@@ -129,8 +138,8 @@ def main():
     llm = load_llm(args)
 
     from mapper.mapper_agent import IoctlMapperAgent
-    agent  = IoctlMapperAgent(kg=kg, llm_client=llm)
-    result = agent.run(max_sites=args.max_sites)
+    agent  = IoctlMapperAgent(kg=kg, llm_client=llm, linux_src_dir=args.linux_src or "")
+    result = agent.run(max_sites=args.max_sites, path_prefix=args.path_prefix or "")
 
     stats = result["stats"]
     logger.info(
