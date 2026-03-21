@@ -1,5 +1,15 @@
 """
 IoctlCallScanner：扫描 Linux 源码目录，找出所有 ioctl() 调用点
+
+只匹配赋值调用形式 ``= ioctl(``，即：
+    ret = ioctl(fd, cmd, arg);
+    if ((err = ioctl(...)) < 0)
+    *result = ioctl(...)
+
+这样可以排除：
+  - 函数定义（long xxx_ioctl(struct file *f, ...)
+  - 函数指针类型声明
+  - 只读 ioctl 字段名等
 """
 import os
 import re
@@ -8,9 +18,8 @@ from typing import List, Optional
 from loguru import logger
 
 
-# 匹配 ioctl() 调用行（避免误匹配函数定义名称，如 foo_ioctl(）
-# 只匹配直接调用 ioctl(...)，不匹配函数定义
-_IOCTL_CALL_RE = re.compile(r'\bioctl\s*\(')
+# 匹配 "= ioctl(" 形式的调用（赋值型 syscall 调用）
+_IOCTL_CALL_RE = re.compile(r'=\s*ioctl\s*\(')
 
 # 匹配 C 函数定义的开头，用于往上找调用者函数名
 # 例如：static int foo_bar(struct xxx *x, ...)
@@ -38,6 +47,21 @@ class IoctlCallSite:
             "line": self.line_no,
             "caller_func": self.caller_func,
             "line_content": self.line_content,
+        }
+
+    def to_call_site_dict(self) -> dict:
+        """转换为与 KG 调用点相同的 dict 格式（供 mapper_agent._resolve 使用）"""
+        return {
+            "caller_id":    None,           # 源码扫描无 KG 实体 ID
+            "caller_name":  self.caller_func,
+            "caller_file":  self.file_path,
+            "caller_start": None,
+            "caller_end":   None,
+            "call_line":    self.line_no,
+            "call_type":    "direct",
+            # 附带上下文，供 _resolve 直接使用（无需再读文件）
+            "_context_lines": self.context_lines,
+            "_line_content":  self.line_content,
         }
 
 

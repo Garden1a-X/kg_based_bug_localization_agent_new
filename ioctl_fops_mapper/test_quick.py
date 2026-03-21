@@ -41,6 +41,8 @@ def parse_args():
                    help="测试处理的调用点数量（默认 5）")
     p.add_argument("--path-prefix", default=None,
                    help="只处理 caller_file 包含此前缀的调用点，如 /drivers/（默认不过滤）")
+    p.add_argument("--linux-src", default=None,
+                   help="Linux 源码根目录；提供时用源码扫描 '= ioctl(' 找调用点，否则用 KG 查询")
     return p.parse_args()
 
 
@@ -131,31 +133,41 @@ def main():
     print(f"  函数名索引: {len(kg.func_name_to_ids)} 个函数")
     print(f"  关系类型: {list(kg.relations.keys())}")
 
-    # ── Step 2: 查询 ioctl 调用点 ────────────────────────────────
-    sep("Step 2: 查询 ioctl() 调用点")
-    call_sites = kg.query_ioctl_call_sites()
-    total = len(call_sites)
-    print(f"✓ 共找到 {total} 个调用点")
-
-    if not call_sites:
-        print("✗ 无调用点，检查 KG 是否包含 CALLS 关系且 tail.name=='ioctl'")
-        sys.exit(1)
+    # ── Step 2: 获取 ioctl 调用点 ────────────────────────────────
+    if args.linux_src:
+        sep("Step 2: 扫描源码查找 '= ioctl(' 调用点")
+        from mapper.scanner import IoctlCallScanner
+        scanner = IoctlCallScanner(args.linux_src)
+        subdirs = [args.path_prefix.lstrip('/')] if args.path_prefix else None
+        if subdirs:
+            print(f"  扫描子目录: {subdirs}")
+        raw_sites = scanner.scan(subdirs=subdirs)
+        call_sites = [s.to_call_site_dict() for s in raw_sites]
+        print(f"✓ 扫描找到 {len(call_sites)} 个 '= ioctl(' 调用点")
+        if not call_sites:
+            print("✗ 无调用点，检查 --linux-src 路径和 --path-prefix 是否正确")
+            sys.exit(1)
+    else:
+        sep("Step 2: 查询 ioctl() 调用点（KG 模式）")
+        call_sites = kg.query_ioctl_call_sites()
+        print(f"✓ 共找到 {len(call_sites)} 个调用点")
+        if not call_sites:
+            print("✗ 无调用点，检查 KG 是否包含 CALLS 关系且 tail.name=='ioctl'")
+            sys.exit(1)
+        if args.path_prefix:
+            prefix = args.path_prefix.replace('\\', '/')
+            call_sites = [
+                s for s in call_sites
+                if prefix in s.get('caller_file', '').replace('\\', '/')
+            ]
+            print(f"  → 过滤 '{prefix}': {len(call_sites)} 个")
 
     sample = call_sites[:3]
     print(f"\n  前 {len(sample)} 个样例:")
     for i, s in enumerate(sample):
         print(f"  [{i}] {s['caller_name']}  @ {s['caller_file']}:{s.get('call_line','?')}")
 
-    if args.path_prefix:
-        prefix = args.path_prefix.replace('\\', '/')
-        filtered = [
-            s for s in call_sites
-            if prefix in s.get('caller_file', '').replace('\\', '/')
-        ]
-        print(f"\n  → 过滤 '{prefix}': {len(filtered)} 个")
-    else:
-        filtered = call_sites
-    sites_to_process = filtered[:args.max_sites]
+    sites_to_process = call_sites[:args.max_sites]
     print(f"  → 本次处理前 {len(sites_to_process)} 个")
 
     # ── Step 3: 查询 fops handler 候选 ──────────────────────────
@@ -175,19 +187,23 @@ def main():
     # ── Step 4: 逐条解析（带详细输出）───────────────────────────
     sep(f"Step 4: LLM 解析（处理 {len(sites_to_process)} 个调用点）")
     from mapper.mapper_agent import IoctlMapperAgent
-    agent = IoctlMapperAgent(kg=kg, llm_client=llm)
+    agent = IoctlMapperAgent(kg=kg, llm_client=llm, linux_src_dir=args.linux_src or "")
 
     ok, fail, unresolvable = 0, 0, 0
     for idx, site in enumerate(sites_to_process):
         caller = site['caller_name']
         print(f"\n  [{idx+1}/{len(sites_to_process)}] {caller} @ {site['caller_file']}:{site.get('call_line','?')}")
 
-        # 读源码
-        src = kg.read_entity_source({
-            "source_file": site['caller_file'],
-            "start_line":  site['caller_start'],
-            "end_line":    site['caller_end'],
-        })
+        # 读源码（scanner 模式直接用 _context_lines，KG 模式读文件）
+        context_lines = site.get('_context_lines')
+        if context_lines is not None:
+            src = '\n'.join(context_lines)
+        else:
+            src = kg.read_entity_source({
+                "source_file": site['caller_file'],
+                "start_line":  site['caller_start'],
+                "end_line":    site['caller_end'],
+            })
         if not src:
             print(f"    ✗ 无法读取源码（路径映射是否正确？）")
             fail += 1

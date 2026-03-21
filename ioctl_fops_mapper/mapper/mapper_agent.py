@@ -1,9 +1,10 @@
 """
 IoctlMapperAgent（新版）：
-  - call site 来自 KG 的 CALLS 边（tail.name=='ioctl'），确保调用方在图谱里
-  - handler 候选来自 KG 的 ASSIGNED_TO 边（tail 含 ioctl），确保处理方在图谱里
-  - LLM 主导选择，KG 提供代码上下文和候选列表
-  - 无启发式 fallback；无法解析则标 unresolved
+  - call site 来源（二选一）：
+      1. 源码扫描（推荐）：扫描 linux_src_dir 下 ``= ioctl(`` 赋值调用形式
+      2. KG 查询（兜底）：来自 CALLS 边（tail.name=='ioctl'）
+  - handler 候选来自 KG 的 ASSIGNED_TO 边（tail 含 ioctl）
+  - LLM 主导选择；无法解析则标 unresolved
 """
 import json
 import os
@@ -26,14 +27,16 @@ class IoctlMapperAgent:
     # LLM 候选列表上限（避免超 token）
     MAX_CANDIDATES = 20
 
-    def __init__(self, kg, llm_client):
+    def __init__(self, kg, llm_client, linux_src_dir: str = ""):
         """
         Args:
-            kg:         KnowledgeGraphInterface 实例（必须）
-            llm_client: LLMClient 实例（必须）
+            kg:            KnowledgeGraphInterface 实例（必须）
+            llm_client:    LLMClient 实例（必须）
+            linux_src_dir: Linux 源码根目录（提供时用源码扫描找调用点，否则用 KG）
         """
-        self.kg  = kg
-        self.llm = llm_client
+        self.kg            = kg
+        self.llm           = llm_client
+        self.linux_src_dir = linux_src_dir
 
     # ──────────────────────────────────────────────────────────────
     # 公共入口
@@ -54,20 +57,31 @@ class IoctlMapperAgent:
                 "unresolved": [...],
             }
         """
-        logger.info("=== IoctlMapperAgent 开始运行（KG-first + LLM-driven）===")
+        logger.info("=== IoctlMapperAgent 开始运行 ===")
 
-        # Step 1: 从 KG 获取 ioctl() 调用点（头在图谱里）
-        logger.info("Step 1: 从 KG 查询 ioctl() 调用点...")
-        call_sites = self.kg.query_ioctl_call_sites()
-        logger.info(f"  找到 {len(call_sites)} 个调用点")
+        # Step 1: 获取 ioctl() 调用点
+        if self.linux_src_dir:
+            # 源码扫描：只找 "= ioctl(" 赋值形式，更精准
+            from mapper.scanner import IoctlCallScanner
+            logger.info(f"Step 1: 扫描源码 {self.linux_src_dir} 查找 '= ioctl(' 调用点...")
+            scanner = IoctlCallScanner(self.linux_src_dir)
+            subdirs = [path_prefix.lstrip('/')] if path_prefix else None
+            raw_sites = scanner.scan(subdirs=subdirs)
+            call_sites = [s.to_call_site_dict() for s in raw_sites]
+            logger.info(f"  扫描找到 {len(call_sites)} 个调用点")
+        else:
+            # 兜底：从 KG 查询
+            logger.info("Step 1: 从 KG 查询 ioctl() 调用点（KG 模式）...")
+            call_sites = self.kg.query_ioctl_call_sites()
+            logger.info(f"  找到 {len(call_sites)} 个调用点")
 
-        if path_prefix:
-            prefix = path_prefix.replace('\\', '/')
-            call_sites = [
-                s for s in call_sites
-                if prefix in s.get('caller_file', '').replace('\\', '/')
-            ]
-            logger.info(f"  过滤 '{prefix}' 后调用点: {len(call_sites)} 个")
+            if path_prefix:
+                prefix = path_prefix.replace('\\', '/')
+                call_sites = [
+                    s for s in call_sites
+                    if prefix in s.get('caller_file', '').replace('\\', '/')
+                ]
+                logger.info(f"  过滤 '{prefix}' 后调用点: {len(call_sites)} 个")
 
         if max_sites > 0:
             call_sites = call_sites[:max_sites]
@@ -122,12 +136,18 @@ class IoctlMapperAgent:
         caller_file = site.get('caller_file', '')
         call_line   = site.get('call_line')
 
-        # 1. 读调用函数源码
-        caller_source = self.kg.read_entity_source(
-            {"source_file": caller_file,
-             "start_line":  site.get('caller_start'),
-             "end_line":    site.get('caller_end')}
-        )
+        # 1. 获取调用点源码上下文
+        context_lines = site.get('_context_lines')
+        if context_lines is not None:
+            # 源码扫描模式：context_lines 由 scanner 直接提供
+            caller_source = '\n'.join(context_lines)
+        else:
+            # KG 模式：通过 KG 读文件
+            caller_source = self.kg.read_entity_source(
+                {"source_file": caller_file,
+                 "start_line":  site.get('caller_start'),
+                 "end_line":    site.get('caller_end')}
+            )
         if not caller_source:
             logger.debug(f"无法读取源码: {caller_file} "
                          f"[{site.get('caller_start')}-{site.get('caller_end')}]")
