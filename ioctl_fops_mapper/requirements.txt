@@ -1,0 +1,3 @@
+# 核心依赖
+openai>=1.0.0             # OpenAI API 客户端（用于 LLM 推理）
+loguru>=0.7.0             # 日志
