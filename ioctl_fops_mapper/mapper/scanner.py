@@ -18,8 +18,8 @@ _FUNC_DEF_RE = re.compile(
     r'^[\w\s\*]+\s+(\w+)\s*\([^;]*$'
 )
 
-# 跳过的目录（编译产物、文档等）
-_SKIP_DIRS = {'.git', 'Documentation', 'tools/testing', 'scripts', '__pycache__'}
+# 跳过的目录（编译产物等），只跳过顶层 Documentation，不跳过子目录中的 Documentation
+_SKIP_DIRS = {'.git', 'tools/testing', 'scripts', '__pycache__'}
 
 
 @dataclass
@@ -93,9 +93,13 @@ class IoctlCallScanner:
 
             for dirpath, dirnames, filenames in os.walk(root_dir):
                 # 跳过不需要的目录
+                # 注意：只在顶层跳过 Documentation，子目录中的 Documentation 可能含真实代码
+                is_toplevel = (dirpath == root_dir)
                 dirnames[:] = [
                     d for d in dirnames
-                    if d not in _SKIP_DIRS and not d.startswith('.')
+                    if d not in _SKIP_DIRS
+                    and not d.startswith('.')
+                    and not (is_toplevel and d == 'Documentation')
                 ]
 
                 for fname in filenames:
