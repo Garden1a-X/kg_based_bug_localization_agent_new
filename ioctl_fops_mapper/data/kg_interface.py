@@ -1553,6 +1553,55 @@ class KnowledgeGraphInterface:
 
         return list(set(target_function_names))  # 去重
 
+    def query_all_fops_vars(self) -> List[Dict[str, Any]]:
+        """
+        查询 KG 中所有看起来像 file_operations 结构体的全局变量。
+
+        通过名称过滤（含 'fops'）找到候选，不依赖 ASSIGNED_TO 关系，
+        规避 KG 建图器漏提取 struct 字段赋值的问题。
+
+        Returns:
+            list of {
+                "fops_var":        变量名,
+                "source_file":     规范化的相对路径,
+                "driver_dir":      驱动目录,
+                "entity_id":       KG 实体 ID（字符串）,
+                "_raw_source_file": KG 中原始路径（用于 read_entity_source）,
+                "_start_line":     结构体定义起始行,
+                "_end_line":       结构体定义结束行,
+            }
+        """
+        results = []
+        for entity in self.entity_by_id.values():
+            if (entity.get('type') != 'VARIABLE'
+                    or entity.get('scope') != 'global'):
+                continue
+            name = entity.get('name', '')
+            if 'fops' not in name.lower():
+                continue
+
+            raw_source_file = entity.get('source_file', '')
+            norm_path = raw_source_file.replace('\\', '/')
+            for marker in ('linux-5.10/', 'linux_data/', 'linux/'):
+                idx = norm_path.find(marker)
+                if idx >= 0:
+                    norm_path = norm_path[idx + len(marker):]
+                    break
+
+            driver_dir = self._extract_driver_dir(norm_path)
+            results.append({
+                "fops_var":         name,
+                "source_file":      norm_path,
+                "driver_dir":       driver_dir,
+                "entity_id":        str(entity.get('id', '')),
+                "_raw_source_file": raw_source_file,
+                "_start_line":      entity.get('start_line'),
+                "_end_line":        entity.get('end_line'),
+            })
+
+        logger.info(f"query_all_fops_vars: 找到 {len(results)} 个 fops 变量")
+        return results
+
     def query_fops_ioctl_handlers(self) -> List[Dict[str, Any]]:
         """
         通过 ASSIGNED_TO 关系找出所有 fops → ioctl handler 的挂载映射。

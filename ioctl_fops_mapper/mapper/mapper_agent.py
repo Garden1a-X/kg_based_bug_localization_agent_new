@@ -165,10 +165,10 @@ class IoctlMapperAgent:
             logger.warning("未找到任何调用点，退出")
             return self._make_result([], [], 0)
 
-        # Step 2: 从 KG 获取全量 fops→ioctl handler 映射（尾在图谱里）
-        logger.info("Step 2: 从 KG 查询 fops → ioctl handler 映射...")
-        all_handlers = self.kg.query_fops_ioctl_handlers()
-        logger.info(f"  找到 {len(all_handlers)} 个 handler 候选")
+        # Step 2: 从 KG 获取全量 fops 变量（不依赖 ASSIGNED_TO）
+        logger.info("Step 2: 从 KG 查询全量 fops 变量...")
+        all_handlers = self.kg.query_all_fops_vars()
+        logger.info(f"  找到 {len(all_handlers)} 个 fops 变量候选")
 
         # Step 3: 对每个调用点进行 LLM 解析
         logger.info("Step 3: LLM 解析调用点...")
@@ -201,19 +201,21 @@ class IoctlMapperAgent:
         对单个调用点进行解析。
 
         流程：
-        1. 读取调用函数源码（KG 给 source_file + start/end_line，文件读取）
-        2. 按目录接近度过滤候选 handler（≤ MAX_CANDIDATES 个）
-        3. LLM 从候选中选一个
-        4. 验证选中的 handler 在 KG 里有对应实体（handler_id）
+        1. 读取调用函数源码
+        2. 按目录接近度过滤候选 fops 变量（≤ MAX_CANDIDATES 个）
+        3. LLM 从候选中选出最匹配的 fops 变量
+        4. 从 fops 变量定义源码中提取 .unlocked_ioctl 字段值
+        5. 在 KG 里查找 handler 函数的实体 ID
 
         Returns:
             (mapping_dict, {})                         — 成功
             (None, {"reason": ..., ...})               — 失败，reason 字段说明原因：
-                "no_source"       无法读取调用点源码
-                "no_candidates"   KG 里找不到任何候选 handler
-                "llm_error"       LLM 调用本身失败（网络/超时/解析错误）
-                "llm_no_match"    LLM 明确返回 selected_index=-1（附 llm_reasoning）
-                "llm_bad_index"   LLM 返回了越界下标
+                "no_source"         无法读取调用点源码
+                "no_candidates"     KG 里找不到任何候选 fops 变量
+                "llm_error"         LLM 调用本身失败（网络/超时/解析错误）
+                "llm_no_match"      LLM 明确返回 selected_index=-1
+                "llm_bad_index"     LLM 返回了越界下标
+                "no_ioctl_in_src"   从源码中未能提取到 .unlocked_ioctl 字段
         """
         caller_name = site.get('caller_name', '')
         caller_file = site.get('caller_file', '')
@@ -237,15 +239,15 @@ class IoctlMapperAgent:
         # 2. 过滤候选（按目录接近度取 top-N）
         candidates = self._filter_candidates(site, all_handlers)
         if not candidates:
-            logger.debug(f"无候选 handler: {caller_name} @ {caller_file}")
+            logger.debug(f"无候选 fops: {caller_name} @ {caller_file}")
             return None, {"reason": "no_candidates"}
 
-        # 3. LLM 选 handler
-        llm_result = self.llm.resolve_ioctl_handler(
+        # 3. LLM 选 fops 变量
+        llm_result = self.llm.select_fops_var(
             caller_source=caller_source,
             call_line=call_line,
             caller_file=caller_file,
-            candidates=candidates,
+            fops_candidates=candidates,
         )
         if not llm_result:
             return None, {"reason": "llm_error"}
@@ -253,22 +255,29 @@ class IoctlMapperAgent:
         idx = llm_result.get("selected_index", -1)
         if idx < 0:
             return None, {
-                "reason":          "llm_no_match",
-                "llm_confidence":  llm_result.get("confidence"),
-                "llm_reasoning":   llm_result.get("reasoning", ""),
+                "reason":         "llm_no_match",
+                "llm_confidence": llm_result.get("confidence"),
+                "llm_reasoning":  llm_result.get("reasoning", ""),
             }
         if idx >= len(candidates):
             return None, {
-                "reason":     "llm_bad_index",
-                "llm_index":  idx,
+                "reason":         "llm_bad_index",
+                "llm_index":      idx,
                 "num_candidates": len(candidates),
             }
 
         chosen = candidates[idx]
 
-        # 4. 在 KG 里找 handler 的实体 ID
-        handler_id = self._find_handler_id(chosen.get("handler_func", ""),
-                                           chosen.get("source_file", ""))
+        # 4. 从 fops 结构体源码中提取 .unlocked_ioctl 字段
+        handler_func = self._extract_ioctl_handler_from_source(chosen)
+        if not handler_func:
+            logger.debug(f"fops 源码中未找到 .unlocked_ioctl: {chosen.get('fops_var')} "
+                         f"@ {chosen.get('source_file')}")
+            return None, {"reason": "no_ioctl_in_src",
+                          "fops_var": chosen.get("fops_var", "")}
+
+        # 5. 在 KG 里找 handler 函数的实体 ID
+        handler_id = self._find_handler_id(handler_func, chosen.get("source_file", ""))
 
         return {
             "call_site": {
@@ -279,7 +288,7 @@ class IoctlMapperAgent:
             },
             "resolution": {
                 "handler_id":   handler_id,
-                "handler_func": chosen.get("handler_func", ""),
+                "handler_func": handler_func,
                 "fops_var":     chosen.get("fops_var", ""),
                 "handler_file": chosen.get("source_file", ""),
                 "driver_dir":   chosen.get("driver_dir", ""),
@@ -302,6 +311,30 @@ class IoctlMapperAgent:
             if idx >= 0:
                 return p[idx + len(marker):]
         return p
+
+    def _extract_ioctl_handler_from_source(self, fops_candidate: Dict[str, Any]) -> Optional[str]:
+        """
+        读取 fops 结构体的源码定义，用正则提取 .unlocked_ioctl 字段的值。
+
+        Args:
+            fops_candidate: query_all_fops_vars() 返回的候选项，
+                            需含 _raw_source_file / _start_line / _end_line
+
+        Returns:
+            handler 函数名字符串，找不到返回 None
+        """
+        import re
+        source = self.kg.read_entity_source({
+            "source_file": fops_candidate.get("_raw_source_file",
+                                              fops_candidate.get("source_file", "")),
+            "start_line":  fops_candidate.get("_start_line"),
+            "end_line":    fops_candidate.get("_end_line"),
+        })
+        if not source:
+            return None
+
+        m = re.search(r'\.unlocked_ioctl\s*=\s*(\w+)', source)
+        return m.group(1) if m else None
 
     def _filter_candidates(
         self,
