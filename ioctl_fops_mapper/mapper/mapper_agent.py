@@ -129,23 +129,26 @@ class IoctlMapperAgent:
         """
         对单个 ioctl() 调用点进行映射。
 
-        策略：
-        1. 无 LLM 时：纯基于调用者函数名 / 文件路径做关键词匹配
-        2. 有 LLM 时：先用 LLM 分析上下文获取 driver_module，再做精确匹配
+        策略（优先级）：
+        1. KG 驱动目录精确匹配（快速、确定性强）
+        2. LLM 分析上下文（KG 无法确定时，如同目录多 handler 歧义）
+        3. 启发式 fallback（兜底）
         """
         if not fops_entries:
             return None
 
-        context_str = self.scanner.get_context_string(site)
+        # Step 1: KG 路径匹配（不需要 LLM）
+        kg_result = self._resolve_with_kg_dir(site, fops_entries)
+        if kg_result:
+            return kg_result
 
+        # Step 2: LLM（KG 无法消歧义时）
+        context_str = self.scanner.get_context_string(site)
         if self.llm and self.llm.is_available():
             return self._resolve_with_llm(site, fops_entries, context_str)
-        else:
-            # 优先用 KG 驱动目录精确匹配，失败再 fallback 启发式
-            kg_result = self._resolve_with_kg_dir(site, fops_entries)
-            if kg_result:
-                return kg_result
-            return self._resolve_heuristic(site, fops_entries)
+
+        # Step 3: 启发式 fallback
+        return self._resolve_heuristic(site, fops_entries)
 
     def _resolve_with_llm(
         self,

@@ -115,7 +115,7 @@ class KnowledgeGraphInterface:
                             # 同时建立 id 映射
                             if 'id' in item:
                                 self.entity_by_id[item['id']] = item
-                    logger.info(f"  ✓ 加载 {entity_type}: {len(self.entities[entity_type])} 个")
+                    logger.debug(f"  ✓ 加载 {entity_type}: {len(self.entities[entity_type])} 个")
         elif isinstance(entities_data, list):
             # 列表格式：根据 type 字段分组（你的格式）
             for entity in entities_data:
@@ -132,7 +132,10 @@ class KnowledgeGraphInterface:
                         self.entity_by_id[entity['id']] = entity
 
             for entity_type, entities in self.entities.items():
-                logger.info(f"  ✓ 加载 {entity_type}: {len(entities)} 个")
+                logger.debug(f"  ✓ 加载 {entity_type}: {len(entities)} 个")
+
+        total_entities = sum(len(v) for v in self.entities.values())
+        logger.info(f"实体加载完成：{total_entities} 个（{len(self.entities)} 种类型）")
 
         # 建立声明-实现映射（针对函数）
         if 'FUNCTION' in self.entities:
@@ -165,7 +168,7 @@ class KnowledgeGraphInterface:
                         if 'tail' in rel:
                             rel['tail'] = str(rel['tail'])
                     self.relations[rel_type] = rel_list
-                    logger.info(f"  ✓ 加载 {rel_type}: {len(rel_list)} 个")
+                    logger.debug(f"  ✓ 加载 {rel_type}: {len(rel_list)} 个")
         elif isinstance(relations_data, list):
             # 列表格式：根据 type 字段分组
             for relation in relations_data:
@@ -181,7 +184,10 @@ class KnowledgeGraphInterface:
                     self.relations[rel_type].append(relation)
 
             for rel_type, relations in self.relations.items():
-                logger.info(f"  ✓ 加载 {rel_type}: {len(relations)} 个")
+                logger.debug(f"  ✓ 加载 {rel_type}: {len(relations)} 个")
+
+        total_rels = sum(len(v) for v in self.relations.values())
+        logger.info(f"关系加载完成：{total_rels} 条（{len(self.relations)} 种类型）")
 
         # 构建包含行号的调用图
         self._build_call_graph_with_lines()
@@ -384,7 +390,7 @@ class KnowledgeGraphInterface:
                     for item in data:
                         if 'id' in item:
                             self.entity_by_id[item['id']] = item
-                logger.info(f"✓ 加载 {entity_type}: {len(self.entities[entity_type])} 个")
+                logger.debug(f"  ✓ 加载 {entity_type}: {len(self.entities[entity_type])} 个")
 
         # 加载关系
         relation_files = {
@@ -413,7 +419,12 @@ class KnowledgeGraphInterface:
                         if 'tail' in rel:
                             rel['tail'] = str(rel['tail'])
                     self.relations[rel_type] = data
-                logger.info(f"✓ 加载 {rel_type}: {len(self.relations[rel_type])} 个")
+                logger.debug(f"  ✓ 加载 {rel_type}: {len(self.relations[rel_type])} 个")
+
+        total_entities = sum(len(v) for v in self.entities.values())
+        total_rels = sum(len(v) for v in self.relations.values())
+        logger.info(f"实体加载完成：{total_entities} 个（{len(self.entities)} 种类型）")
+        logger.info(f"关系加载完成：{total_rels} 条（{len(self.relations)} 种类型）")
 
         # 建立声明-实现映射和函数名映射（针对函数）
         if 'FUNCTION' in self.entities:
