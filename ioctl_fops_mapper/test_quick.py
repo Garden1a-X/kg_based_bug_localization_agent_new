@@ -170,18 +170,18 @@ def main():
     sites_to_process = call_sites[:args.max_sites]
     print(f"  → 本次处理前 {len(sites_to_process)} 个")
 
-    # ── Step 3: 查询 fops handler 候选 ──────────────────────────
-    sep("Step 3: 查询 fops → ioctl handler 候选")
-    all_handlers = kg.query_fops_ioctl_handlers()
-    print(f"✓ 共找到 {len(all_handlers)} 个 fops → ioctl handler 映射")
+    # ── Step 3: 查询全量 file_operations 变量（TYPE_OF 关系）──────
+    sep("Step 3: 查询全量 file_operations 变量（TYPE_OF）")
+    all_handlers = kg.query_all_fops_vars()
+    print(f"✓ 共找到 {len(all_handlers)} 个 file_operations 变量")
 
     if not all_handlers:
-        print("✗ 无候选，检查 KG 是否包含 ASSIGNED_TO 关系且 handler 名含 'ioctl'")
+        print("✗ 无候选，检查 KG 是否包含 TYPE_OF 关系且有 file_operations 类型实体")
         sys.exit(1)
 
     print(f"\n  全部 fops 列表（{len(all_handlers)} 条）:")
     for h in all_handlers:
-        print(f"    [{h['driver_dir']}]  {h['fops_var']}.unlocked_ioctl = {h['handler_func']}")
+        print(f"    [{h['driver_dir']}]  {h['fops_var']}  @ {h['source_file']}")
 
     # ── Step 4: 逐条解析（带详细输出）───────────────────────────
     sep(f"Step 4: LLM 解析（处理 {len(sites_to_process)} 个调用点）")
@@ -211,16 +211,16 @@ def main():
 
         # 过滤候选
         candidates = agent._filter_candidates(site, all_handlers)
-        print(f"    候选 handler 数: {len(candidates)}")
+        print(f"    候选 fops 数: {len(candidates)}")
         if candidates:
-            print(f"    top-3 候选: {[c['handler_func'] for c in candidates[:3]]}")
+            print(f"    top-3 候选: {[c['fops_var'] for c in candidates[:3]]}")
 
-        # LLM 选择
-        llm_result = llm.resolve_ioctl_handler(
+        # LLM 选 fops 变量
+        llm_result = llm.select_fops_var(
             caller_source=src,
             call_line=site.get('call_line'),
             caller_file=site['caller_file'],
-            candidates=candidates,
+            fops_candidates=candidates,
         )
 
         if llm_result is None:
@@ -233,7 +233,6 @@ def main():
         reason = llm_result.get("reasoning", "")
 
         if sel_idx == -1:
-            # LLM 合法地判断无法静态确定（如动态分发、PHY层转发等）
             print(f"    ○ 无法静态确定（动态分发）")
             print(f"      reasoning: {reason}")
             unresolvable += 1
@@ -245,9 +244,16 @@ def main():
             continue
 
         chosen = candidates[sel_idx]
-        print(f"    ✓ 选中: {chosen['handler_func']}  (confidence={conf}/10)")
-        print(f"      fops_var: {chosen['fops_var']}")
-        print(f"      handler_file: {chosen['source_file']}")
+        print(f"    ✓ 选中 fops: {chosen['fops_var']}  (confidence={conf}/10)")
+        print(f"      source_file: {chosen['source_file']}")
+
+        # 从源码提取 .unlocked_ioctl 字段
+        handler_func = agent._extract_ioctl_handler_from_source(chosen)
+        if handler_func:
+            print(f"      .unlocked_ioctl = {handler_func}")
+        else:
+            print(f"      ✗ 源码中未找到 .unlocked_ioctl 字段")
+
         print(f"      reasoning: {reason}")
         ok += 1
 
@@ -255,7 +261,7 @@ def main():
     sep("汇总")
     print(f"  处理: {len(sites_to_process)}  成功: {ok}  动态分发: {unresolvable}  失败: {fail}")
     print(f"  解析率: {ok / len(sites_to_process):.0%}" if sites_to_process else "")
-    print(f"\n  KG 总调用点: {total}  handler 候选: {len(all_handlers)}")
+    print(f"\n  KG 总调用点: {len(call_sites)}  fops 候选: {len(all_handlers)}")
     print()
 
 
