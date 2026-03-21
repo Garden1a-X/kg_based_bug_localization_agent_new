@@ -188,11 +188,10 @@ class IoctlCallScanner:
         for i in range(ioctl_line_idx, search_start - 1, -1):
             stripped = lines[i].strip()
 
-            # 粗略追踪大括号深度（往上走，遇到 } 增加，遇到 { 减少）
-            brace_depth += stripped.count('}') - stripped.count('{')
+            # 往上走时：遇到 { 说明进入了一个外层 scope（深度+1），遇到 } 说明退出
+            brace_depth += stripped.count('{') - stripped.count('}')
 
-            # 当大括号深度 > 0 时，说明我们已经出了 ioctl 所在的函数体
-            # 这行可能是函数定义（函数定义在 C 里通常从第 0 列开始）
+            # 深度 > 0 且在列 0：说明找到了包裹 ioctl 的函数定义开头
             if brace_depth > 0 and not lines[i].startswith((' ', '\t')):
                 m = _FUNC_DEF_RE.match(lines[i])
                 if m:

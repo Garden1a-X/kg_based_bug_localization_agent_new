@@ -191,7 +191,10 @@ def main():
     ok, fail, unresolvable = 0, 0, 0
     for idx, site in enumerate(sites_to_process):
         caller = site['caller_name']
+        ioctl_line = site.get('_line_content', '')
         print(f"\n  [{idx+1}/{len(sites_to_process)}] {caller} @ {site['caller_file']}:{site.get('call_line','?')}")
+        if ioctl_line:
+            print(f"    ioctl: {ioctl_line}")
 
         # 读源码（scanner 已预置 _context_lines；否则通过 KG 读文件）
         context_lines = site.get('_context_lines')
