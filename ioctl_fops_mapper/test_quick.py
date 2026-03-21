@@ -166,7 +166,7 @@ def main():
     from mapper.mapper_agent import IoctlMapperAgent
     agent = IoctlMapperAgent(kg=kg, llm_client=llm)
 
-    ok, fail = 0, 0
+    ok, fail, unresolvable = 0, 0, 0
     for idx, site in enumerate(sites_to_process):
         caller = site['caller_name']
         print(f"\n  [{idx+1}/{len(sites_to_process)}] {caller} @ {site['caller_file']}:{site.get('call_line','?')}")
@@ -206,8 +206,15 @@ def main():
         conf = llm_result.get("confidence", 0)
         reason = llm_result.get("reasoning", "")
 
+        if sel_idx == -1:
+            # LLM 合法地判断无法静态确定（如动态分发、PHY层转发等）
+            print(f"    ○ 无法静态确定（动态分发）")
+            print(f"      reasoning: {reason}")
+            unresolvable += 1
+            continue
+
         if sel_idx < 0 or sel_idx >= len(candidates):
-            print(f"    ✗ LLM 选择无效 (selected_index={sel_idx})")
+            print(f"    ✗ LLM 返回非法下标 (selected_index={sel_idx})")
             fail += 1
             continue
 
@@ -220,8 +227,8 @@ def main():
 
     # ── 汇总 ────────────────────────────────────────────────────
     sep("汇总")
-    print(f"  处理: {len(sites_to_process)}  成功: {ok}  失败: {fail}")
-    print(f"  成功率: {ok / len(sites_to_process):.0%}" if sites_to_process else "")
+    print(f"  处理: {len(sites_to_process)}  成功: {ok}  动态分发: {unresolvable}  失败: {fail}")
+    print(f"  解析率: {ok / len(sites_to_process):.0%}" if sites_to_process else "")
     print(f"\n  KG 总调用点: {total}  handler 候选: {len(all_handlers)}")
     print()
 
