@@ -141,6 +141,10 @@ class IoctlMapperAgent:
         if self.llm and self.llm.is_available():
             return self._resolve_with_llm(site, fops_entries, context_str)
         else:
+            # 优先用 KG 驱动目录精确匹配，失败再 fallback 启发式
+            kg_result = self._resolve_with_kg_dir(site, fops_entries)
+            if kg_result:
+                return kg_result
             return self._resolve_heuristic(site, fops_entries)
 
     def _resolve_with_llm(
@@ -216,6 +220,71 @@ class IoctlMapperAgent:
 
         # LLM 匹配失败，fallback 到启发式
         return self._resolve_heuristic(site, fops_entries)
+
+    def _resolve_with_kg_dir(
+        self,
+        site: IoctlCallSite,
+        fops_entries: List[FopsEntry],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        基于 KG 中 fops 来源目录与 ioctl 调用点目录的精确匹配。
+
+        策略：
+        - 只考虑 source="kg" 的条目
+        - 提取调用点的驱动目录，与 fops handler 的 source_file 目录做最长公共前缀匹配
+        - 若唯一最佳匹配的目录深度 >= 2，则认为匹配成功
+        """
+        kg_entries = [e for e in fops_entries if e.source == "kg"]
+        if not kg_entries:
+            return None
+
+        # 调用点的目录路径各部分
+        site_dir = site.file_path.replace('\\', '/').rsplit('/', 1)[0]
+        site_parts = [p for p in site_dir.split('/') if p]
+
+        def common_prefix_depth(entry: FopsEntry) -> int:
+            entry_dir = entry.source_file.replace('\\', '/').rsplit('/', 1)[0]
+            entry_parts = [p for p in entry_dir.split('/') if p]
+            depth = 0
+            for a, b in zip(site_parts, entry_parts):
+                if a == b:
+                    depth += 1
+                else:
+                    break
+            return depth
+
+        scored = [(common_prefix_depth(e), e) for e in kg_entries]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        best_depth, best = scored[0]
+        # 要求至少匹配到 drivers/xxx 级别（depth >= 2）
+        if best_depth < 2:
+            return None
+
+        # 检查是否有并列最优（同分多个 handler），此时无法确定，交给 heuristic 或 LLM
+        top_entries = [e for d, e in scored if d == best_depth]
+        if len(top_entries) > 1:
+            # 多个同级别候选，选 source_file 目录与 site_dir 完全相同的优先
+            exact = [e for e in top_entries if e.source_file.replace('\\', '/').rsplit('/', 1)[0] == site_dir]
+            if len(exact) == 1:
+                best = exact[0]
+            else:
+                # 仍然有歧义，返回 None 交给 heuristic
+                return None
+
+        return {
+            "call_site": site.to_dict(),
+            "resolution": {
+                "fops_variable": best.fops_var,
+                "unlocked_ioctl_handler": best.handler_func,
+                "field_name": best.field_name,
+                "fops_source_file": best.source_file,
+                "driver_module": best.driver_hint,
+            },
+            "confidence": round(min(0.5 + best_depth * 0.1, 0.95), 2),
+            "method": "kg_dir_match",
+            "reasoning": f"KG驱动目录匹配（公共路径深度={best_depth}，handler={best.handler_func}）",
+        }
 
     def _resolve_heuristic(
         self,

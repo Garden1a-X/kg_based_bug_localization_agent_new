@@ -143,36 +143,29 @@ class FileOpsIndexer:
     # ========== 内部实现 ==========
 
     def _build_from_kg(self) -> List[FopsEntry]:
-        """Layer 1：从 KG 的 ASSIGNED_TO 关系中提取 unlocked_ioctl handler"""
+        """Layer 1：从 KG 的 ASSIGNED_TO 关系中提取 fops → ioctl handler 映射"""
         entries = []
+        try:
+            mappings = self.kg.query_fops_ioctl_handlers()
+        except Exception as e:
+            logger.warning(f"KG query_fops_ioctl_handlers 失败: {e}")
+            return entries
 
-        for field_name in ("unlocked_ioctl", "compat_ioctl"):
-            try:
-                handler_names = self.kg.query_assigned_to_by_field_name(field_name)
-            except Exception as e:
-                logger.warning(f"KG 查询 {field_name} 失败: {e}")
+        for m in mappings:
+            handler = m.get("handler_func", "")
+            if not handler:
                 continue
-
-            for handler in handler_names:
-                if not handler:
-                    continue
-                # 尝试从 KG 获取 handler 的源文件信息
-                source_file = ""
-                func_info = self._kg_get_func_info(handler)
-                if func_info:
-                    source_file = func_info.get("source_file", "")
-
-                driver_hint = self._infer_driver_hint(source_file, handler)
-
-                entries.append(FopsEntry(
-                    handler_func=handler,
-                    field_name=field_name,
-                    fops_var="<unknown>",   # KG 中不直接存 fops 变量名
-                    source_file=source_file,
-                    line_no=0,
-                    driver_hint=driver_hint,
-                    source="kg",
-                ))
+            source_file = m.get("source_file", "")
+            driver_hint = self._infer_driver_hint(source_file, handler)
+            entries.append(FopsEntry(
+                handler_func=handler,
+                field_name=m.get("field_name", "unlocked_ioctl"),
+                fops_var=m.get("fops_var", "<unknown>"),
+                source_file=source_file,
+                line_no=0,
+                driver_hint=driver_hint,
+                source="kg",
+            ))
 
         return entries
 

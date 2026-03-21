@@ -78,19 +78,23 @@ class KnowledgeGraphInterface:
         """加载所有JSON文件"""
         logger.info("正在加载数据...")
 
-        # 检查是否使用合并格式（entity.json + relation.json）
+        # 检查是否使用合并格式（entity.json + relation.json/jsonl）
         entity_file = self.data_dir / 'entity.json'
         relation_file = self.data_dir / 'relation.json'
+        relation_file_jsonl = self.data_dir / 'relation.jsonl'
 
-        if entity_file.exists() and relation_file.exists():
+        if entity_file.exists() and relation_file_jsonl.exists():
+            logger.info("检测到合并格式数据文件（jsonl 关系）")
+            self._load_merged_format(entity_file, relation_file_jsonl, jsonl=True)
+        elif entity_file.exists() and relation_file.exists():
             logger.info("检测到合并格式数据文件")
             self._load_merged_format(entity_file, relation_file)
         else:
             logger.info("使用分散格式数据文件")
             self._load_separated_format()
 
-    def _load_merged_format(self, entity_file: Path, relation_file: Path):
-        """加载合并格式的数据（entity.json + relation.json）"""
+    def _load_merged_format(self, entity_file: Path, relation_file: Path, jsonl: bool = False):
+        """加载合并格式的数据（entity.json + relation.json/jsonl）"""
         # 加载实体
         logger.info(f"加载实体文件: {entity_file.name}")
         with open(entity_file, 'r', encoding='utf-8') as f:
@@ -137,8 +141,17 @@ class KnowledgeGraphInterface:
 
         # 加载关系
         logger.info(f"加载关系文件: {relation_file.name}")
-        with open(relation_file, 'r', encoding='utf-8') as f:
-            relations_data = json.load(f)
+        if jsonl:
+            relations_list = []
+            with open(relation_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        relations_list.append(json.loads(line))
+            relations_data = relations_list
+        else:
+            with open(relation_file, 'r', encoding='utf-8') as f:
+                relations_data = json.load(f)
 
         # 解析关系数据结构
         if isinstance(relations_data, dict):
@@ -1528,6 +1541,80 @@ class KnowledgeGraphInterface:
             logger.debug(f"未找到字段 '{field_name}' 的 ASSIGNED_TO/MOUNTED_TO 关系")
 
         return list(set(target_function_names))  # 去重
+
+    def query_fops_ioctl_handlers(self) -> List[Dict[str, Any]]:
+        """
+        通过 ASSIGNED_TO 关系找出所有 fops → ioctl handler 的挂载映射。
+
+        KG 中的实际模式：
+            fops变量 (VARIABLE, scope=global) --ASSIGNED_TO--> ioctl_handler (FUNCTION)
+
+        Returns:
+            list of {
+                "fops_var":      fops 结构体变量名,
+                "handler_func":  ioctl handler 函数名,
+                "field_name":    "unlocked_ioctl"（固定，因为 KG 无字段区分）,
+                "source_file":   handler 函数所在源文件（KG 中的路径）,
+                "driver_dir":    从 source_file 推断的驱动目录（如 "drivers/staging/greybus"）,
+            }
+        """
+        results = []
+        assigned_to_rels = self.relations.get('ASSIGNED_TO', [])
+        if not assigned_to_rels:
+            logger.warning("KG 中没有 ASSIGNED_TO 关系，fops handler 索引为空")
+            return results
+
+        for rel in assigned_to_rels:
+            head_id = str(rel.get('head', ''))
+            tail_id = str(rel.get('tail', ''))
+            head_entity = self.entity_by_id.get(head_id, {})
+            tail_entity = self.entity_by_id.get(tail_id, {})
+
+            # head 是全局 VARIABLE（fops 结构体），tail 是 FUNCTION（ioctl handler）
+            if (head_entity.get('type') == 'VARIABLE'
+                    and head_entity.get('scope') == 'global'
+                    and tail_entity.get('type') == 'FUNCTION'):
+
+                handler_name = tail_entity.get('name', '')
+                fops_var_name = head_entity.get('name', '')
+
+                # 只保留名字含 ioctl 的 handler（过滤无关赋值噪声）
+                if 'ioctl' not in handler_name.lower():
+                    continue
+
+                source_file = tail_entity.get('source_file', '')
+                # 标准化路径：提取 linux 源码根后的相对路径
+                norm_path = source_file.replace('\\', '/')
+                # 兼容不同 linux 源码根路径前缀
+                for marker in ('linux-5.10/', 'linux_data/', 'linux/'):
+                    idx = norm_path.find(marker)
+                    if idx >= 0:
+                        norm_path = norm_path[idx + len(marker):]
+                        break
+
+                driver_dir = self._extract_driver_dir(norm_path)
+
+                results.append({
+                    "fops_var": fops_var_name,
+                    "handler_func": handler_name,
+                    "field_name": "unlocked_ioctl",
+                    "source_file": norm_path,
+                    "driver_dir": driver_dir,
+                })
+
+        logger.info(f"query_fops_ioctl_handlers: 找到 {len(results)} 条 fops→ioctl handler 映射")
+        return results
+
+    @staticmethod
+    def _extract_driver_dir(rel_path: str) -> str:
+        """
+        从相对路径提取驱动目录，精确到文件所在目录。
+        例如：drivers/staging/greybus/fw-management.c → drivers/staging/greybus
+        """
+        p = rel_path.replace('\\', '/')
+        # 取目录部分
+        parts = p.rsplit('/', 1)
+        return parts[0] if len(parts) > 1 else ''
 
     def _get_callees_with_lines(self, func_id: str, error_line: Optional[int] = None, allow_indirect: bool = True) -> List[Tuple[str, Optional[int], bool]]:
         """
