@@ -97,6 +97,84 @@ class LLMClient:
             logger.error(f"JSON 解析失败: {e}")
             return None
 
+    def resolve_ioctl_handler(
+        self,
+        caller_source: str,
+        call_line: Optional[int],
+        caller_file: str,
+        candidates: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        单轮 LLM 调用：给定调用函数源码 + 候选 handler 列表，直接选出最匹配的。
+
+        Args:
+            caller_source:  调用函数的完整源码（带行号前缀）
+            call_line:      ioctl() 所在行号
+            caller_file:    调用文件路径（辅助 LLM 理解驱动归属）
+            candidates:     候选 handler 列表，每项含
+                            {handler_func, fops_var, source_file, driver_dir}
+
+        Returns:
+            {
+                "selected_index": 0~N-1（candidates 下标），无匹配为 -1,
+                "confidence":     0~10,
+                "reasoning":      "选择理由"
+            }
+            失败返回 None
+        """
+        if not self.is_available() or not candidates:
+            return None
+
+        candidates_str = json.dumps(
+            [{"index": i,
+              "handler_func": c.get("handler_func"),
+              "fops_var":     c.get("fops_var"),
+              "source_file":  c.get("source_file"),
+              "driver_dir":   c.get("driver_dir")}
+             for i, c in enumerate(candidates)],
+            ensure_ascii=False, indent=2
+        )
+        call_hint = f"（注意第 {call_line} 行是 ioctl() 调用）" if call_line else ""
+
+        prompt = f"""你是 Linux 内核专家。以下是一段调用了 ioctl() 的内核函数源码{call_hint}，
+以及从内核知识图谱中提取的候选 ioctl handler 列表。
+请判断该 ioctl() 调用最终会走到哪个 handler。
+
+调用函数文件路径：{caller_file}
+
+函数源码：
+```c
+{caller_source[:3000]}
+```
+
+候选 handler 列表（来自 file_operations.unlocked_ioctl 注册）：
+{candidates_str}
+
+选择依据：
+1. ioctl() 的第二个参数（命令宏）的名称前缀与哪个 handler/fops 变量名最匹配？
+2. 调用文件路径与哪个 handler 的 source_file 目录最接近？
+3. 函数语义上操作的是哪种设备/子系统？
+
+以 JSON 格式回答（不要其他说明）：
+{{
+  "selected_index": 0到{len(candidates)-1}的整数，无合适匹配填 -1,
+  "confidence": 0到10的整数,
+  "reasoning": "简短理由"
+}}"""
+
+        try:
+            response = self.complete(
+                prompt=prompt,
+                system_prompt="你是一个 Linux 内核代码分析专家，擅长 ioctl 调用路径分析。",
+                temperature=0.1,
+                max_tokens=300,
+                timeout=120,
+            )
+            return self._parse_json_response(response)
+        except Exception as e:
+            logger.error(f"resolve_ioctl_handler 失败: {e}")
+            return None
+
     def analyze_ioctl_context(
         self,
         code_context: str,

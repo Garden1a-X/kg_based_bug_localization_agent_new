@@ -2221,6 +2221,98 @@ class KnowledgeGraphInterface:
         
         return stats
 
+    # ============ ioctl 映射专用查询 ============
+
+    def query_ioctl_call_sites(self) -> List[Dict[str, Any]]:
+        """
+        从 KG 的 CALLS 关系中找出所有调用了 ioctl() 的内核函数。
+
+        通过 CALLS 边中 tail.name == 'ioctl' 定位调用点，
+        head 必须是 FUNCTION 实体且有 source_file/start_line/end_line，
+        确保调用方也在图谱中。
+
+        Returns:
+            list of {
+                "caller_id":        调用函数的实体 ID,
+                "caller_name":      调用函数名,
+                "caller_file":      KG 中记录的源文件路径（原始，未重映射）,
+                "caller_start":     函数起始行,
+                "caller_end":       函数结束行,
+                "call_line":        ioctl() 调用所在行,
+                "call_type":        "direct" / "indirect" / None,
+            }
+        """
+        calls = self.relations.get('CALLS', [])
+        results = []
+        seen = set()  # (caller_id, call_line) 去重
+
+        for rel in calls:
+            tail_id = str(rel.get('tail', ''))
+            tail = self.entity_by_id.get(tail_id, {})
+            if tail.get('name') != 'ioctl':
+                continue
+
+            head_id = str(rel.get('head', ''))
+            caller = self.entity_by_id.get(head_id, {})
+            if caller.get('type') != 'FUNCTION':
+                continue
+
+            source_file = caller.get('source_file', '')
+            start_line  = caller.get('start_line')
+            end_line    = caller.get('end_line')
+            call_line   = rel.get('call_line')
+
+            # 必须有源文件和行号信息才能读代码
+            if not source_file or not start_line or not end_line:
+                continue
+
+            key = (head_id, call_line)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            results.append({
+                "caller_id":    head_id,
+                "caller_name":  caller.get('name', ''),
+                "caller_file":  source_file,
+                "caller_start": start_line,
+                "caller_end":   end_line,
+                "call_line":    call_line,
+                "call_type":    rel.get('call_type'),
+            })
+
+        logger.info(f"query_ioctl_call_sites: 找到 {len(results)} 个调用 ioctl() 的函数")
+        return results
+
+    def read_entity_source(self, entity: Dict[str, Any]) -> Optional[str]:
+        """
+        按实体的 source_file / start_line / end_line 从文件读取源代码。
+        自动应用路径重映射（path_mappings）。
+
+        Args:
+            entity: 实体 dict，需含 source_file / start_line / end_line
+
+        Returns:
+            源码字符串（含行号注释），失败返回 None
+        """
+        source_file = entity.get('source_file', '')
+        start_line  = entity.get('start_line')
+        end_line    = entity.get('end_line')
+
+        if not source_file or not start_line or not end_line:
+            return None
+
+        remapped = self._remap_path(source_file)
+        try:
+            with open(remapped, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            # 加行号，方便 LLM 定位 call_line
+            selected = lines[start_line - 1: end_line]
+            return ''.join(f"{start_line + i:4d} | {l}" for i, l in enumerate(selected))
+        except Exception as e:
+            logger.debug(f"读取源文件失败 ({remapped}): {e}")
+            return None
+
 
 # 便捷函数：创建知识图谱接口
 def create_kg_interface(data_dir: str = None) -> KnowledgeGraphInterface:
