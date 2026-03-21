@@ -93,13 +93,13 @@ class IoctlCallScanner:
 
             for dirpath, dirnames, filenames in os.walk(root_dir):
                 # 跳过不需要的目录
-                # 注意：只在顶层跳过 Documentation，子目录中的 Documentation 可能含真实代码
-                is_toplevel = (dirpath == root_dir)
+                # 只在 linux_src_dir 的直接子目录才跳过 Documentation（内核根目录级别的文档目录）
+                is_linux_root = (dirpath == self.linux_src_dir)
                 dirnames[:] = [
                     d for d in dirnames
                     if d not in _SKIP_DIRS
                     and not d.startswith('.')
-                    and not (is_toplevel and d == 'Documentation')
+                    and not (is_linux_root and d == 'Documentation')
                 ]
 
                 for fname in filenames:
