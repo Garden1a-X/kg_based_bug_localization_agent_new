@@ -1555,30 +1555,62 @@ class KnowledgeGraphInterface:
 
     def query_all_fops_vars(self) -> List[Dict[str, Any]]:
         """
-        查询 KG 中所有看起来像 file_operations 结构体的全局变量。
+        通过 TYPE_OF 关系找出所有类型为 file_operations 的全局变量。
 
-        通过名称过滤（含 'fops'）找到候选，不依赖 ASSIGNED_TO 关系，
-        规避 KG 建图器漏提取 struct 字段赋值的问题。
+        KG 中的模式：
+            fops变量 (VARIABLE, scope=global) --TYPE_OF--> file_operations (STRUCT/TYPE)
+
+        这比用名称过滤（含 'fops'）更准确，因为变量名不一定含 'fops'。
+        如 greybus/authentication.c 中的 cap_fops：
+            {'id': '2644203', 'name': 'cap_fops', ...}
+            --TYPE_OF--> {'id': '3230651', 'name': 'file_operations', ...}
 
         Returns:
             list of {
-                "fops_var":        变量名,
-                "source_file":     规范化的相对路径,
-                "driver_dir":      驱动目录,
-                "entity_id":       KG 实体 ID（字符串）,
+                "fops_var":         变量名,
+                "source_file":      规范化的相对路径,
+                "driver_dir":       驱动目录,
+                "entity_id":        KG 实体 ID（字符串）,
                 "_raw_source_file": KG 中原始路径（用于 read_entity_source）,
-                "_start_line":     结构体定义起始行,
-                "_end_line":       结构体定义结束行,
+                "_start_line":      结构体定义起始行,
+                "_end_line":        结构体定义结束行,
             }
         """
+        # 1. 找出所有名为 'file_operations' 的类型实体 ID
+        fops_type_ids = {
+            str(e.get('id'))
+            for e in self.entity_by_id.values()
+            if e.get('name') == 'file_operations'
+        }
+
+        # 2. 遍历 TYPE_OF 关系，收集 tail 指向 file_operations 的 VARIABLE 实体 ID
+        type_of_rels = self.relations.get('TYPE_OF', [])
+        if fops_type_ids and type_of_rels:
+            matched_var_ids = {
+                str(rel['head'])
+                for rel in type_of_rels
+                if str(rel.get('tail')) in fops_type_ids
+            }
+            use_type_of = True
+        else:
+            logger.warning("KG 中无 file_operations 类型实体或 TYPE_OF 关系，降级为名称过滤")
+            matched_var_ids = None
+            use_type_of = False
+
         results = []
         for entity in self.entity_by_id.values():
-            if (entity.get('type') != 'VARIABLE'
-                    or entity.get('scope') != 'global'):
+            if entity.get('type') != 'VARIABLE' or entity.get('scope') != 'global':
                 continue
-            name = entity.get('name', '')
-            if 'fops' not in name.lower():
-                continue
+
+            eid = str(entity.get('id', ''))
+
+            if use_type_of:
+                if eid not in matched_var_ids:
+                    continue
+            else:
+                # 降级：靠名字含 'fops' 过滤
+                if 'fops' not in entity.get('name', '').lower():
+                    continue
 
             raw_source_file = entity.get('source_file', '')
             norm_path = raw_source_file.replace('\\', '/')
@@ -1590,16 +1622,17 @@ class KnowledgeGraphInterface:
 
             driver_dir = self._extract_driver_dir(norm_path)
             results.append({
-                "fops_var":         name,
+                "fops_var":         entity.get('name', ''),
                 "source_file":      norm_path,
                 "driver_dir":       driver_dir,
-                "entity_id":        str(entity.get('id', '')),
+                "entity_id":        eid,
                 "_raw_source_file": raw_source_file,
                 "_start_line":      entity.get('start_line'),
                 "_end_line":        entity.get('end_line'),
             })
 
-        logger.info(f"query_all_fops_vars: 找到 {len(results)} 个 fops 变量")
+        logger.info(f"query_all_fops_vars: 找到 {len(results)} 个 file_operations 变量"
+                    + (" (TYPE_OF)" if use_type_of else " (降级名称过滤)"))
         return results
 
     def query_fops_ioctl_handlers(self) -> List[Dict[str, Any]]:
