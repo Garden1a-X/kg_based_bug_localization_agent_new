@@ -105,14 +105,20 @@ class LLMClient:
         candidates: List[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
         """
-        单轮 LLM 调用：给定调用函数源码 + 候选 handler 列表，直接选出最匹配的。
+        单轮 LLM 调用：给定 ioctl() 调用点源码 + 候选 file_operations 列表，
+        判断该 ioctl() 调用会走到哪个驱动的 file_operations。
+
+        核心逻辑：
+        - ioctl() 的路由是由 fd 对应的 file_operations.unlocked_ioctl 决定的
+        - LLM 需要先判断 fd 是从哪个设备/驱动 open() 来的
+        - 再从候选 file_operations 列表中找到对应那个驱动的 fops
+        - handler 是该 fops 的 unlocked_ioctl 字段
 
         Args:
-            caller_source:  调用函数的完整源码（带行号前缀）
+            caller_source:  ioctl() 调用点周围的源码上下文
             call_line:      ioctl() 所在行号
-            caller_file:    调用文件路径（辅助 LLM 理解驱动归属）
-            candidates:     候选 handler 列表，每项含
-                            {handler_func, fops_var, source_file, driver_dir}
+            caller_file:    调用文件路径
+            candidates:     候选列表，每项含 {handler_func, fops_var, source_file, driver_dir}
 
         Returns:
             {
@@ -125,41 +131,44 @@ class LLMClient:
         if not self.is_available() or not candidates:
             return None
 
+        # 候选以 fops 为主体展示，handler_func 作为补充信息
         candidates_str = json.dumps(
-            [{"index": i,
-              "handler_func": c.get("handler_func"),
-              "fops_var":     c.get("fops_var"),
-              "source_file":  c.get("source_file"),
-              "driver_dir":   c.get("driver_dir")}
+            [{"index":      i,
+              "fops_var":   c.get("fops_var"),
+              "driver_dir": c.get("driver_dir"),
+              "source_file": c.get("source_file"),
+              "unlocked_ioctl_handler": c.get("handler_func")}
              for i, c in enumerate(candidates)],
             ensure_ascii=False, indent=2
         )
-        call_hint = f"（注意第 {call_line} 行是 ioctl() 调用）" if call_line else ""
+        call_hint = f"（第 {call_line} 行是 ioctl() 调用）" if call_line else ""
 
-        prompt = f"""你是 Linux 内核专家。以下是一段调用了 ioctl() 的内核函数源码{call_hint}，
-以及从内核知识图谱中提取的候选 ioctl handler 列表。
-请判断该 ioctl() 调用最终会走到哪个 handler。
+        prompt = f"""你是 Linux 内核专家。以下是一段包含 ioctl() 调用的 C 代码{call_hint}。
 
-调用函数文件路径：{caller_file}
+ioctl() 的执行路径由 fd 背后的 file_operations 结构体决定：
+  fd = open("/dev/xxx", ...) → 内核根据设备类型找到对应驱动的 file_operations
+  → 调用 file_operations.unlocked_ioctl
 
-函数源码：
+你的任务：
+1. 分析代码，判断 fd 是通过 open() 打开了哪种设备（设备路径、命令宏前缀、函数语义等）
+2. 从下方候选 file_operations 列表中，选出负责处理该设备 ioctl 的那个 fops
+3. 若列表中没有合适的，填 -1
+
+调用文件路径：{caller_file}
+
+代码上下文：
 ```c
 {caller_source[:3000]}
 ```
 
-候选 handler 列表（来自 file_operations.unlocked_ioctl 注册）：
+候选 file_operations 列表（每项来自内核源码中 .unlocked_ioctl 的注册）：
 {candidates_str}
-
-选择依据：
-1. ioctl() 的第二个参数（命令宏）的名称前缀与哪个 handler/fops 变量名最匹配？
-2. 调用文件路径与哪个 handler 的 source_file 目录最接近？
-3. 函数语义上操作的是哪种设备/子系统？
 
 以 JSON 格式回答（不要其他说明）：
 {{
   "selected_index": 0到{len(candidates)-1}的整数，无合适匹配填 -1,
   "confidence": 0到10的整数,
-  "reasoning": "简短理由"
+  "reasoning": "先说明 fd 对应什么设备/驱动，再说为什么选这个 fops"
 }}"""
 
         try:
@@ -167,7 +176,7 @@ class LLMClient:
                 prompt=prompt,
                 system_prompt="你是一个 Linux 内核代码分析专家，擅长 ioctl 调用路径分析。",
                 temperature=0.1,
-                max_tokens=300,
+                max_tokens=400,
                 timeout=120,
             )
             return self._parse_json_response(response)
