@@ -170,6 +170,20 @@ class IoctlMapperAgent:
             "reasoning":  llm_result.get("reasoning", ""),
         }
 
+    @staticmethod
+    def _to_relative_path(path: str) -> str:
+        """
+        将 KG 存储的绝对路径转换为 Linux 源码根目录下的相对路径。
+        例如：/mnt/afs/.../linux-5.10/drivers/atm/eni.c → drivers/atm/eni.c
+        找不到已知 linux 根标记时返回原始路径。
+        """
+        p = path.replace('\\', '/')
+        for marker in ('linux-5.10/', 'linux_data/', 'linux/'):
+            idx = p.find(marker)
+            if idx >= 0:
+                return p[idx + len(marker):]
+        return p
+
     def _filter_candidates(
         self,
         site: Dict[str, Any],
@@ -178,8 +192,10 @@ class IoctlMapperAgent:
         """
         按与调用点的目录接近度对候选排序，取前 MAX_CANDIDATES 个。
         用路径公共前缀深度作为分数。
+        caller_file 可能是绝对路径，需先归一化为相对路径再比较。
         """
-        site_parts = site.get('caller_file', '').replace('\\', '/').split('/')
+        rel_caller = self._to_relative_path(site.get('caller_file', ''))
+        site_parts = rel_caller.split('/')
 
         def depth(handler: Dict) -> int:
             h_parts = handler.get('source_file', '').replace('\\', '/').split('/')
