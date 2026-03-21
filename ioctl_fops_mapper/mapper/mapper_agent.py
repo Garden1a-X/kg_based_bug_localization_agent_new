@@ -48,6 +48,23 @@ class IoctlMapperAgent:
     # KG 文件→函数 索引（源码扫描模式专用）
     # ──────────────────────────────────────────────────────────────
 
+    def _kg_path_to_rel(self, kg_path: str) -> str:
+        """
+        把 KG 中存储的绝对路径转换为相对于 linux_src_dir 的相对路径。
+
+        转换步骤：
+        1. 调用 kg._remap_path() 应用 --path-mapping 规则，把 KG 路径换成本机路径
+        2. 去掉 linux_src_dir 前缀，得到相对路径（如 drivers/mmc/host/sdhci.c）
+
+        兜底：步骤 2 失败时回退到 _to_relative_path() 的 marker 匹配。
+        """
+        local = self.kg._remap_path(kg_path).replace('\\', '/')
+        src_dir = os.path.abspath(self.linux_src_dir).replace('\\', '/').rstrip('/')
+        if local.startswith(src_dir + '/'):
+            return local[len(src_dir) + 1:]
+        # 兜底：用硬编码 marker（兼容没有传 path-mapping 的情况）
+        return self._to_relative_path(kg_path)
+
     def _build_kg_file_index(self) -> None:
         """
         遍历 KG 所有 FUNCTION 实体，按相对路径建立
@@ -60,7 +77,7 @@ class IoctlMapperAgent:
             src = entity.get('source_file', '')
             if not src:
                 continue
-            rel = self._to_relative_path(src)
+            rel = self._kg_path_to_rel(src)
             self._kg_file_func_index.setdefault(rel, []).append({
                 'id':         eid,
                 'name':       entity.get('name', ''),
