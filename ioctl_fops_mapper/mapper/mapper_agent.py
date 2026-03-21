@@ -9,7 +9,7 @@ IoctlMapperAgent（新版）：
 import json
 import os
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from loguru import logger
 
 
@@ -37,6 +37,48 @@ class IoctlMapperAgent:
         self.kg            = kg
         self.llm           = llm_client
         self.linux_src_dir = linux_src_dir
+
+        # 源码扫描模式下：构建 KG 文件路径 → 函数行范围 索引
+        # 用于扫描到 ioctl 调用后，回 KG 查 caller_id / caller_name
+        self._kg_file_func_index: Dict[str, List[Dict]] = {}
+        if linux_src_dir:
+            self._build_kg_file_index()
+
+    # ──────────────────────────────────────────────────────────────
+    # KG 文件→函数 索引（源码扫描模式专用）
+    # ──────────────────────────────────────────────────────────────
+
+    def _build_kg_file_index(self) -> None:
+        """
+        遍历 KG 所有 FUNCTION 实体，按相对路径建立
+        { rel_path: [{id, name, start_line, end_line}, ...] } 索引。
+        源码扫描找到 ioctl 调用后，用此索引反查 caller_id / caller_name。
+        """
+        for eid, entity in self.kg.entity_by_id.items():
+            if entity.get('type') != 'FUNCTION':
+                continue
+            src = entity.get('source_file', '')
+            if not src:
+                continue
+            rel = self._to_relative_path(src)
+            self._kg_file_func_index.setdefault(rel, []).append({
+                'id':         eid,
+                'name':       entity.get('name', ''),
+                'start_line': entity.get('start_line'),
+                'end_line':   entity.get('end_line'),
+            })
+        logger.debug(f"KG 文件→函数索引构建完成：{len(self._kg_file_func_index)} 个文件")
+
+    def _lookup_caller_in_kg(self, file_rel_path: str, ioctl_line: int) -> Optional[Dict]:
+        """
+        在 KG 中找包含给定行号的函数实体（start_line <= line <= end_line）。
+        返回 {id, name, start_line, end_line}，未找到返回 None。
+        """
+        for func in self._kg_file_func_index.get(file_rel_path, []):
+            s, e = func.get('start_line'), func.get('end_line')
+            if s and e and s <= ioctl_line <= e:
+                return func
+        return None
 
     # ──────────────────────────────────────────────────────────────
     # 公共入口
@@ -69,6 +111,21 @@ class IoctlMapperAgent:
             raw_sites = scanner.scan(subdirs=subdirs)
             call_sites = [s.to_call_site_dict() for s in raw_sites]
             logger.info(f"  扫描找到 {len(call_sites)} 个调用点")
+
+            # 用 KG 反查 caller_id / caller_name（比正则字符串匹配更准确）
+            kg_hit = 0
+            for site in call_sites:
+                line = site.get('call_line')
+                if not line:
+                    continue
+                kg_info = self._lookup_caller_in_kg(site['caller_file'], line)
+                if kg_info:
+                    site['caller_id']    = kg_info['id']
+                    site['caller_name']  = kg_info['name']
+                    site['caller_start'] = kg_info['start_line']
+                    site['caller_end']   = kg_info['end_line']
+                    kg_hit += 1
+            logger.info(f"  KG 反查 caller：{kg_hit}/{len(call_sites)} 个命中")
         else:
             # 兜底：从 KG 查询
             logger.info("Step 1: 从 KG 查询 ioctl() 调用点...")
@@ -105,11 +162,11 @@ class IoctlMapperAgent:
             if (idx + 1) % 50 == 0:
                 logger.info(f"  进度: {idx + 1}/{len(call_sites)}")
 
-            mapping = self._resolve(site, all_handlers)
+            mapping, fail_info = self._resolve(site, all_handlers)
             if mapping:
                 mappings.append(mapping)
             else:
-                unresolved.append({"call_site": site, "reason": "llm_no_match"})
+                unresolved.append({"call_site": site, **fail_info})
 
         logger.info(f"=== 完成：{len(mappings)} 成功 / {len(unresolved)} 未解析 ===")
         return self._make_result(mappings, unresolved, len(call_sites))
@@ -122,7 +179,7 @@ class IoctlMapperAgent:
         self,
         site: Dict[str, Any],
         all_handlers: List[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         """
         对单个调用点进行解析。
 
@@ -131,6 +188,15 @@ class IoctlMapperAgent:
         2. 按目录接近度过滤候选 handler（≤ MAX_CANDIDATES 个）
         3. LLM 从候选中选一个
         4. 验证选中的 handler 在 KG 里有对应实体（handler_id）
+
+        Returns:
+            (mapping_dict, {})                         — 成功
+            (None, {"reason": ..., ...})               — 失败，reason 字段说明原因：
+                "no_source"       无法读取调用点源码
+                "no_candidates"   KG 里找不到任何候选 handler
+                "llm_error"       LLM 调用本身失败（网络/超时/解析错误）
+                "llm_no_match"    LLM 明确返回 selected_index=-1（附 llm_reasoning）
+                "llm_bad_index"   LLM 返回了越界下标
         """
         caller_name = site.get('caller_name', '')
         caller_file = site.get('caller_file', '')
@@ -139,10 +205,8 @@ class IoctlMapperAgent:
         # 1. 获取调用点源码上下文
         context_lines = site.get('_context_lines')
         if context_lines is not None:
-            # scanner 已提供上下文，直接使用
             caller_source = '\n'.join(context_lines)
         else:
-            # 无预置上下文，通过 KG 读取源文件
             caller_source = self.kg.read_entity_source(
                 {"source_file": caller_file,
                  "start_line":  site.get('caller_start'),
@@ -151,13 +215,13 @@ class IoctlMapperAgent:
         if not caller_source:
             logger.debug(f"无法读取源码: {caller_file} "
                          f"[{site.get('caller_start')}-{site.get('caller_end')}]")
-            return None
+            return None, {"reason": "no_source"}
 
         # 2. 过滤候选（按目录接近度取 top-N）
         candidates = self._filter_candidates(site, all_handlers)
         if not candidates:
             logger.debug(f"无候选 handler: {caller_name} @ {caller_file}")
-            return None
+            return None, {"reason": "no_candidates"}
 
         # 3. LLM 选 handler
         llm_result = self.llm.resolve_ioctl_handler(
@@ -167,15 +231,25 @@ class IoctlMapperAgent:
             candidates=candidates,
         )
         if not llm_result:
-            return None
+            return None, {"reason": "llm_error"}
 
         idx = llm_result.get("selected_index", -1)
-        if idx < 0 or idx >= len(candidates):
-            return None
+        if idx < 0:
+            return None, {
+                "reason":          "llm_no_match",
+                "llm_confidence":  llm_result.get("confidence"),
+                "llm_reasoning":   llm_result.get("reasoning", ""),
+            }
+        if idx >= len(candidates):
+            return None, {
+                "reason":     "llm_bad_index",
+                "llm_index":  idx,
+                "num_candidates": len(candidates),
+            }
 
         chosen = candidates[idx]
 
-        # 4. 在 KG 里找 handler 的实体 ID（尾在图谱里）
+        # 4. 在 KG 里找 handler 的实体 ID
         handler_id = self._find_handler_id(chosen.get("handler_func", ""),
                                            chosen.get("source_file", ""))
 
@@ -196,7 +270,7 @@ class IoctlMapperAgent:
             "both_in_kg": handler_id is not None,
             "confidence": round(llm_result.get("confidence", 0) / 10.0, 2),
             "reasoning":  llm_result.get("reasoning", ""),
-        }
+        }, {}
 
     @staticmethod
     def _to_relative_path(path: str) -> str:
