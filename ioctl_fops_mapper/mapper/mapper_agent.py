@@ -71,7 +71,7 @@ class IoctlMapperAgent:
             logger.info(f"  扫描找到 {len(call_sites)} 个调用点")
         else:
             # 兜底：从 KG 查询
-            logger.info("Step 1: 从 KG 查询 ioctl() 调用点（KG 模式）...")
+            logger.info("Step 1: 从 KG 查询 ioctl() 调用点...")
             call_sites = self.kg.query_ioctl_call_sites()
             logger.info(f"  找到 {len(call_sites)} 个调用点")
 
@@ -139,10 +139,10 @@ class IoctlMapperAgent:
         # 1. 获取调用点源码上下文
         context_lines = site.get('_context_lines')
         if context_lines is not None:
-            # 源码扫描模式：context_lines 由 scanner 直接提供
+            # scanner 已提供上下文，直接使用
             caller_source = '\n'.join(context_lines)
         else:
-            # KG 模式：通过 KG 读文件
+            # 无预置上下文，通过 KG 读取源文件
             caller_source = self.kg.read_entity_source(
                 {"source_file": caller_file,
                  "start_line":  site.get('caller_start'),

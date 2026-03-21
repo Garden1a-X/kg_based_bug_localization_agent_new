@@ -148,7 +148,7 @@ def main():
             print("✗ 无调用点，检查 --linux-src 路径和 --path-prefix 是否正确")
             sys.exit(1)
     else:
-        sep("Step 2: 查询 ioctl() 调用点（KG 模式）")
+        sep("Step 2: 查询 ioctl() 调用点（从 KG CALLS 边）")
         call_sites = kg.query_ioctl_call_sites()
         print(f"✓ 共找到 {len(call_sites)} 个调用点")
         if not call_sites:
@@ -194,7 +194,7 @@ def main():
         caller = site['caller_name']
         print(f"\n  [{idx+1}/{len(sites_to_process)}] {caller} @ {site['caller_file']}:{site.get('call_line','?')}")
 
-        # 读源码（scanner 模式直接用 _context_lines，KG 模式读文件）
+        # 读源码（scanner 已预置 _context_lines；否则通过 KG 读文件）
         context_lines = site.get('_context_lines')
         if context_lines is not None:
             src = '\n'.join(context_lines)

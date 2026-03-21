@@ -2,13 +2,13 @@
 """
 run_ioctl_mapper.py — ioctl 调用映射入口
 
-call site 来源（二选一）：
-  1. 源码扫描（推荐）：提供 --linux-src，扫描 '= ioctl(' 赋值调用形式
-  2. KG 查询（兜底）：不提供 --linux-src，从 KG CALLS 边查找
+调用点查找方式（二选一，KG 始终用于 handler 候选和 LLM 上下文）：
+  --linux-src 指定源码目录：扫描源文件，找 '= ioctl(' 赋值调用（推荐）
+  不指定 --linux-src：从 KG 的 CALLS 边查找（兜底）
 
 用法示例：
 
-  # 源码扫描模式（推荐）
+  # 推荐：遍历源码找调用点
   python run_ioctl_mapper.py \\
       --kg-data-dir /data/xuao/code_kg/data/linux \\
       --linux-src /data/xuao/code_kg/data/linux_data \\
@@ -18,7 +18,7 @@ call site 来源（二选一）：
       --llm-model gpt-4o-mini \\
       --output output/ioctl_mappings.json
 
-  # KG 模式（兼容旧用法）
+  # 兜底：从 KG CALLS 边找调用点
   python run_ioctl_mapper.py \\
       --kg-data-dir /data/xuao/code_kg/data/linux \\
       --path-mapping /mnt/afs/liyuekeng/workspace/data/linux-5.10:/data/xuao/code_kg/data/linux_data \\
@@ -59,11 +59,10 @@ def parse_args():
     parser.add_argument("--llm-host", default="http://localhost:11434",
                         help="Ollama host")
 
-    # 源码扫描模式（推荐）
     parser.add_argument("--linux-src", default=None,
-                        help="Linux 源码根目录；提供时用源码扫描 '= ioctl(' 找调用点")
+                        help="Linux 源码根目录；提供时遍历源文件找 '= ioctl(' 调用点，否则从 KG CALLS 边查找")
     parser.add_argument("--path-prefix", default=None,
-                        help="只扫/过滤此子目录，如 tools/testing（源码扫描时为子目录，KG 模式时为路径过滤）")
+                        help="只处理此路径前缀下的调用点，如 tools/testing")
 
     # 运行控制
     parser.add_argument("--max-sites", type=int, default=0,
