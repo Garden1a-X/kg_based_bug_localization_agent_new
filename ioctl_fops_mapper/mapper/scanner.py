@@ -192,17 +192,19 @@ class IoctlCallScanner:
             brace_depth += stripped.count('}') - stripped.count('{')
 
             # 当大括号深度 > 0 时，说明我们已经出了 ioctl 所在的函数体
-            # 这行可能是函数定义
-            if brace_depth > 0:
+            # 这行可能是函数定义（函数定义在 C 里通常从第 0 列开始）
+            if brace_depth > 0 and not lines[i].startswith((' ', '\t')):
                 m = _FUNC_DEF_RE.match(lines[i])
                 if m:
                     return m.group(1)
                 # 也尝试更宽泛的匹配：找 "word(" 形式但不是控制语句
-                simple = re.match(r'^[\w\s\*]+\b(\w+)\s*\(', lines[i])
-                if simple:
-                    name = simple.group(1)
-                    if name not in {'if', 'while', 'for', 'switch', 'do', 'return', 'sizeof'}:
-                        return name
+                # 只对非缩进行（列0）尝试，避免把 \tprintf(...) 误识别为函数定义
+                if not lines[i].startswith((' ', '\t')):
+                    simple = re.match(r'^[\w\s\*]+\b(\w+)\s*\(', lines[i])
+                    if simple:
+                        name = simple.group(1)
+                        if name not in {'if', 'while', 'for', 'switch', 'do', 'return', 'sizeof'}:
+                            return name
 
         return "<unknown>"
 
