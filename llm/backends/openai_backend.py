@@ -90,6 +90,9 @@ class OpenAIBackend(BaseLLMBackend):
             )
 
             result = response.choices[0].message.content
+            if result is None:
+                logger.error(f"OpenAI 后端返回 content=None，原始响应: {response}")
+                return None
             logger.debug(f"OpenAI 后端推理成功，生成 {len(result)} 字符")
             return result
 
