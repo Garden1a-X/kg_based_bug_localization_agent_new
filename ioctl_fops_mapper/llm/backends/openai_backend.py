@@ -79,20 +79,18 @@ class OpenAIBackend(BaseLLMBackend):
             logger.error("OpenAI 后端不可用")
             return None
 
-        try:
+        def _do_request(**kw):
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
-                **kwargs
+                **kw
             )
-
             msg = response.choices[0].message
             result = msg.content
             if not result:
-                # 推理模型（DeepSeek/QwQ）可能把回答放在 reasoning_content
                 result = getattr(msg, "reasoning_content", None)
                 if result:
                     logger.debug("content 为空，使用 reasoning_content 作为结果")
@@ -103,7 +101,19 @@ class OpenAIBackend(BaseLLMBackend):
             logger.debug(f"OpenAI 后端推理成功，生成 {len(result)} 字符")
             return result
 
+        try:
+            return _do_request(**kwargs)
         except Exception as e:
+            err_str = str(e)
+            # 模型不支持 response_format，自动降级重试
+            if "response_format" in err_str and "400" in err_str and "response_format" in kwargs:
+                logger.warning("模型不支持 response_format，降级重试（不传 response_format）")
+                fallback_kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
+                try:
+                    return _do_request(**fallback_kwargs)
+                except Exception as e2:
+                    logger.error(f"OpenAI 后端推理失败: {e2}")
+                    return None
             logger.error(f"OpenAI 后端推理失败: {e}")
             return None
 
