@@ -91,13 +91,15 @@ class OpenAIBackend(BaseLLMBackend):
             msg = response.choices[0].message
             result = msg.content
             if not result:
-                result = getattr(msg, "reasoning_content", None)
-                if result:
-                    logger.debug("content 为空，使用 reasoning_content 作为结果")
+                finish = response.choices[0].finish_reason
+                reasoning = getattr(msg, "reasoning_content", None)
+                if finish == "length":
+                    logger.error(f"OpenAI 后端 max_tokens 不足（推理模型思考耗尽了 token），请增大 max_tokens")
                 else:
-                    finish = response.choices[0].finish_reason
-                    logger.error(f"OpenAI 后端返回空内容 (finish_reason={finish})，原始响应: {response}")
-                    return None
+                    logger.error(f"OpenAI 后端返回空 content (finish_reason={finish})")
+                if reasoning:
+                    logger.debug(f"reasoning_content 前200字: {reasoning[:200]}")
+                return None
             logger.debug(f"OpenAI 后端推理成功，生成 {len(result)} 字符")
             return result
 

@@ -218,7 +218,7 @@ ioctl() 的执行路径由 fd 背后的 file_operations 结构体决定：
                 prompt=prompt,
                 system_prompt="你是一个 Linux 内核代码分析专家，擅长 ioctl 调用路径分析。",
                 temperature=0.1,
-                max_tokens=400,
+                max_tokens=4000,
                 timeout=120,
                 use_json_mode=self.json_mode,
             )
@@ -282,7 +282,7 @@ ioctl() 的执行路径由 fd 背后的 file_operations 结构体决定：
                 prompt=prompt,
                 system_prompt="你是一个 Linux 内核代码分析专家。",
                 temperature=0.2,
-                max_tokens=600,
+                max_tokens=4000,
                 timeout=120,
                 use_json_mode=self.json_mode,
             )
@@ -343,7 +343,7 @@ ioctl 调用分析：
                 prompt=prompt,
                 system_prompt="你是一个 Linux 内核代码分析专家。",
                 temperature=0.2,
-                max_tokens=400,
+                max_tokens=4000,
                 timeout=120,
                 use_json_mode=self.json_mode,
             )
@@ -419,8 +419,8 @@ ioctl 调用分析：
                 prompt=prompt,
                 system_prompt="你是一个 Linux 内核代码分析专家，擅长 ioctl 调用路径分析。",
                 temperature=0.1,
-                max_tokens=300,
-                timeout=60,
+                max_tokens=4000,
+                timeout=120,
                 use_json_mode=self.json_mode,
             )
             return self._parse_json_response(response)
@@ -505,7 +505,7 @@ ioctl() 的执行路径由 fd 背后的 file_operations 结构体决定：
                 prompt=prompt,
                 system_prompt="你是一个 Linux 内核代码分析专家，擅长 ioctl 调用路径分析。",
                 temperature=0.1,
-                max_tokens=400,
+                max_tokens=4000,
                 timeout=120,
                 use_json_mode=self.json_mode,
             )
