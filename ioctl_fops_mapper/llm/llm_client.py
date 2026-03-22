@@ -25,8 +25,16 @@ class LLMClient:
         result = client.complete("分析这段C代码...")
     """
 
-    def __init__(self, backend: str = 'openai', **backend_config):
+    def __init__(self, backend: str = 'openai', json_mode: bool = False, **backend_config):
+        """
+        Args:
+            backend:    后端类型，openai / ollama / local
+            json_mode:  True 时在所有结构化 JSON 调用中传入
+                        response_format={"type":"json_object"}（需后端支持）
+            **backend_config: 传给后端的具体参数（model、base_url、api_key 等）
+        """
         self.backend_type = backend
+        self.json_mode    = json_mode
         self.backend: Optional[BaseLLMBackend] = None
 
         if backend == 'openai':
@@ -40,6 +48,8 @@ class LLMClient:
 
         if not self.backend.is_available():
             logger.warning(f"LLM 后端 '{backend}' 初始化失败或不可用")
+        if json_mode:
+            logger.info("JSON mode 已启用（response_format=json_object）")
 
     def is_available(self) -> bool:
         return self.backend is not None and self.backend.is_available()
@@ -74,13 +84,17 @@ class LLMClient:
         system_prompt: str = "你是一个Linux内核代码分析专家，擅长理解C代码结构和驱动模型。",
         temperature: float = 0.3,
         max_tokens: int = 2000,
-        timeout: int = 180
+        timeout: int = 180,
+        use_json_mode: bool = False,
     ) -> Optional[str]:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ]
-        return self.chat_completion(messages, temperature, max_tokens, timeout)
+        extra = {}
+        if use_json_mode or self.json_mode:
+            extra["response_format"] = {"type": "json_object"}
+        return self.chat_completion(messages, temperature, max_tokens, timeout, **extra)
 
     def _parse_json_response(self, response: str) -> Optional[dict]:
         """从 LLM 返回中解析 JSON（处理 markdown 代码块、尾随逗号、多余文本等）"""

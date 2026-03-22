@@ -43,6 +43,8 @@ def parse_args():
                    help="只处理 caller_file 包含此前缀的调用点，如 /drivers/（默认不过滤）")
     p.add_argument("--linux-src", default=None,
                    help="Linux 源码根目录；提供时用源码扫描 '= ioctl(' 找调用点，否则用 KG 查询")
+    p.add_argument("--json-mode", action="store_true",
+                   help="启用 JSON mode（response_format=json_object），需后端支持")
     return p.parse_args()
 
 
@@ -103,13 +105,16 @@ def main():
     # ── Step 0: LLM 连通性 ──────────────────────────────────────
     sep("Step 0: LLM 连通性检查")
     from llm.llm_client import LLMClient
+    json_mode = getattr(args, 'json_mode', False)
     if args.llm_backend == "openai":
-        llm = LLMClient(backend="openai", base_url=args.llm_base_url,
+        llm = LLMClient(backend="openai", json_mode=json_mode,
+                        base_url=args.llm_base_url,
                         api_key=args.llm_api_key, model=args.llm_model)
     elif args.llm_backend == "ollama":
-        llm = LLMClient(backend="ollama", host=args.llm_host, model=args.llm_model)
+        llm = LLMClient(backend="ollama", json_mode=json_mode,
+                        host=args.llm_host, model=args.llm_model)
     else:
-        llm = LLMClient(backend="local",
+        llm = LLMClient(backend="local", json_mode=json_mode,
                         server_url=args.llm_base_url or "http://localhost:8000",
                         model=args.llm_model)
 

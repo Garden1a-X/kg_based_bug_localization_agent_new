@@ -58,6 +58,9 @@ def parse_args():
     parser.add_argument("--llm-model", default="gpt-4o-mini")
     parser.add_argument("--llm-host", default="http://localhost:11434",
                         help="Ollama host")
+    parser.add_argument("--json-mode", action="store_true",
+                        help="启用 JSON mode（response_format=json_object），"
+                             "需后端支持，可消除 LLM 返回非法 JSON 的问题")
 
     parser.add_argument("--linux-src", default=None,
                         help="Linux 源码根目录；提供时遍历源文件找 '= ioctl(' 调用点，否则从 KG CALLS 边查找")
@@ -105,16 +108,19 @@ def load_kg(kg_data_dir: str, path_mappings: dict):
 
 def load_llm(args):
     from llm.llm_client import LLMClient
+    json_mode = getattr(args, 'json_mode', False)
     if args.llm_backend == "openai":
         if not args.llm_base_url:
             logger.error("--llm-backend openai 需要 --llm-base-url")
             sys.exit(1)
-        client = LLMClient(backend="openai", base_url=args.llm_base_url,
+        client = LLMClient(backend="openai", json_mode=json_mode,
+                           base_url=args.llm_base_url,
                            api_key=args.llm_api_key, model=args.llm_model)
     elif args.llm_backend == "ollama":
-        client = LLMClient(backend="ollama", host=args.llm_host, model=args.llm_model)
+        client = LLMClient(backend="ollama", json_mode=json_mode,
+                           host=args.llm_host, model=args.llm_model)
     else:
-        client = LLMClient(backend="local",
+        client = LLMClient(backend="local", json_mode=json_mode,
                            server_url=args.llm_base_url or "http://localhost:8000",
                            model=args.llm_model)
 
