@@ -83,18 +83,42 @@ class LLMClient:
         return self.chat_completion(messages, temperature, max_tokens, timeout)
 
     def _parse_json_response(self, response: str) -> Optional[dict]:
-        """从 LLM 返回中解析 JSON（处理 markdown 代码块）"""
+        """从 LLM 返回中解析 JSON（处理 markdown 代码块、尾随逗号、多余文本等）"""
+        import re
         if not response:
             return None
         content = response.strip()
+
+        # 去除 markdown 代码块
         if '```json' in content:
             content = content.split('```json')[1].split('```')[0].strip()
         elif '```' in content:
             content = content.split('```')[1].split('```')[0].strip()
+
+        # 1. 直接解析
         try:
             return json.loads(content)
+        except Exception:
+            pass
+
+        # 2. 提取第一个 {...} 块再解析
+        m = re.search(r'\{[\s\S]*\}', content)
+        if not m:
+            logger.error("JSON 解析失败: 未找到 JSON 对象")
+            return None
+        chunk = m.group()
+        try:
+            return json.loads(chunk)
+        except Exception:
+            pass
+
+        # 3. 清理常见问题后重试：尾随逗号、单引号键值
+        cleaned = re.sub(r',\s*([}\]])', r'\1', chunk)   # 去尾随逗号
+        cleaned = re.sub(r"'([^']*)'", r'"\1"', cleaned) # 单引号→双引号（简单情形）
+        try:
+            return json.loads(cleaned)
         except Exception as e:
-            logger.error(f"JSON 解析失败: {e}")
+            logger.error(f"JSON 解析失败: {e}\n原始片段: {chunk[:200]}")
             return None
 
     def resolve_ioctl_handler(
