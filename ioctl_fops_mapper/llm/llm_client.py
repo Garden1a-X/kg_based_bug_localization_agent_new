@@ -92,7 +92,7 @@ class LLMClient:
             {"role": "user", "content": prompt}
         ]
         extra = {}
-        if use_json_mode or self.json_mode:
+        if use_json_mode:
             extra["response_format"] = {"type": "json_object"}
         return self.chat_completion(messages, temperature, max_tokens, timeout, **extra)
 
@@ -220,6 +220,7 @@ ioctl() 的执行路径由 fd 背后的 file_operations 结构体决定：
                 temperature=0.1,
                 max_tokens=400,
                 timeout=120,
+                use_json_mode=self.json_mode,
             )
             return self._parse_json_response(response)
         except Exception as e:
@@ -282,7 +283,8 @@ ioctl() 的执行路径由 fd 背后的 file_operations 结构体决定：
                 system_prompt="你是一个 Linux 内核代码分析专家。",
                 temperature=0.2,
                 max_tokens=600,
-                timeout=120
+                timeout=120,
+                use_json_mode=self.json_mode,
             )
             return self._parse_json_response(response)
         except Exception as e:
@@ -342,7 +344,8 @@ ioctl 调用分析：
                 system_prompt="你是一个 Linux 内核代码分析专家。",
                 temperature=0.2,
                 max_tokens=400,
-                timeout=120
+                timeout=120,
+                use_json_mode=self.json_mode,
             )
             result = self._parse_json_response(response)
             if not result:
@@ -418,6 +421,7 @@ ioctl 调用分析：
                 temperature=0.1,
                 max_tokens=300,
                 timeout=60,
+                use_json_mode=self.json_mode,
             )
             return self._parse_json_response(response)
         except Exception as e:
@@ -503,6 +507,7 @@ ioctl() 的执行路径由 fd 背后的 file_operations 结构体决定：
                 temperature=0.1,
                 max_tokens=400,
                 timeout=120,
+                use_json_mode=self.json_mode,
             )
             return self._parse_json_response(response)
         except Exception as e:
