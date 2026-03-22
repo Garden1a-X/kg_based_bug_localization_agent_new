@@ -122,7 +122,7 @@ def main():
         print("✗ LLM 不可用，退出")
         sys.exit(1)
 
-    ping = llm.complete("回复 OK", max_tokens=10, timeout=30)
+    ping = llm.complete("回复 OK", max_tokens=200, timeout=30)
     if ping:
         print(f"✓ LLM 可用，回复: {ping.strip()[:80]}")
     else:

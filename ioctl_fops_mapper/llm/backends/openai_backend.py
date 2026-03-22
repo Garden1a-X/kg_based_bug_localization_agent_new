@@ -89,10 +89,17 @@ class OpenAIBackend(BaseLLMBackend):
                 **kwargs
             )
 
-            result = response.choices[0].message.content
-            if result is None:
-                logger.error(f"OpenAI 后端返回 content=None，原始响应: {response}")
-                return None
+            msg = response.choices[0].message
+            result = msg.content
+            if not result:
+                # 推理模型（DeepSeek/QwQ）可能把回答放在 reasoning_content
+                result = getattr(msg, "reasoning_content", None)
+                if result:
+                    logger.debug("content 为空，使用 reasoning_content 作为结果")
+                else:
+                    finish = response.choices[0].finish_reason
+                    logger.error(f"OpenAI 后端返回空内容 (finish_reason={finish})，原始响应: {response}")
+                    return None
             logger.debug(f"OpenAI 后端推理成功，生成 {len(result)} 字符")
             return result
 
