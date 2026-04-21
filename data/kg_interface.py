@@ -394,12 +394,15 @@ class KnowledgeGraphInterface:
                     data = json.load(f)
                     if isinstance(data, dict):
                         data = list(data.values())
-                    # 标准化关系中的ID为字符串
+                    # 标准化关系中的ID为字符串（tail 可能是列表）
                     for rel in data:
                         if 'head' in rel:
                             rel['head'] = str(rel['head'])
                         if 'tail' in rel:
-                            rel['tail'] = str(rel['tail'])
+                            if isinstance(rel['tail'], list):
+                                rel['tail'] = [str(x) for x in rel['tail']]
+                            else:
+                                rel['tail'] = str(rel['tail'])
                     self.relations[rel_type] = data
                 logger.info(f"✓ 加载 {rel_type}: {len(self.relations[rel_type])} 个")
 
