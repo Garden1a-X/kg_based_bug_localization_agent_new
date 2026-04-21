@@ -352,7 +352,7 @@ def main():
     args = parse_args()
 
     # 配置日志
-    setup_logger()
+    setup_logger(log_level="DEBUG" if args.verbose else "INFO")
 
     try:
         # 判断运行模式
