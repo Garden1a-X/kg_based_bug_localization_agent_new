@@ -384,6 +384,7 @@ class KnowledgeGraphInterface:
             'HAS_PARAMETERS': 'relation_has_parameters.json',
             'HAS_VARIABLES': 'relation_has_variables.json',
             'INCLUDES': 'relation_includes.json',
+            'ioctl_call': 'relation_ioctl_call.json',
         }
 
         for rel_type, filename in relation_files.items():
@@ -1623,6 +1624,20 @@ class KnowledgeGraphInterface:
                     # 如果图谱中没有找到，fallback 到 Mock 数据
                     logger.debug(f"图谱中未找到字段 '{field_name}' 的 ASSIGNED_TO，尝试 Mock 数据")
                     # TODO: 这里可以添加 Mock fallback 逻辑
+
+        # 遍历 ioctl_call 关系（直接调用，格式简单，只有 head/tail）
+        for rel in self.relations.get('ioctl_call', []):
+            head_id = rel.get('head')
+            tail_id = rel.get('tail')
+
+            if head_id not in equivalent_ids:
+                continue
+
+            callee_id_normalized = self.normalize_id(tail_id)
+            callee_entity = self.entity_by_id.get(callee_id_normalized)
+
+            if callee_entity and 'name' in callee_entity:
+                result.append((callee_entity['name'], None, False))  # ioctl_call 没有 call_line
 
         return result
 
