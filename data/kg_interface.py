@@ -145,23 +145,29 @@ class KnowledgeGraphInterface:
             # 字典格式：按类型分组
             for rel_type, rel_list in relations_data.items():
                 if isinstance(rel_list, list):
-                    # 标准化关系中的ID为字符串
+                    # 标准化关系中的ID为字符串（tail 可能是列表）
                     for rel in rel_list:
                         if 'head' in rel:
                             rel['head'] = str(rel['head'])
                         if 'tail' in rel:
-                            rel['tail'] = str(rel['tail'])
+                            if isinstance(rel['tail'], list):
+                                rel['tail'] = [str(x) for x in rel['tail']]
+                            else:
+                                rel['tail'] = str(rel['tail'])
                     self.relations[rel_type] = rel_list
                     logger.info(f"  ✓ 加载 {rel_type}: {len(rel_list)} 个")
         elif isinstance(relations_data, list):
             # 列表格式：根据 type 字段分组
             for relation in relations_data:
                 if isinstance(relation, dict):
-                    # 标准化关系中的ID为字符串
+                    # 标准化关系中的ID为字符串（tail 可能是列表）
                     if 'head' in relation:
                         relation['head'] = str(relation['head'])
                     if 'tail' in relation:
-                        relation['tail'] = str(relation['tail'])
+                        if isinstance(relation['tail'], list):
+                            relation['tail'] = [str(x) for x in relation['tail']]
+                        else:
+                            relation['tail'] = str(relation['tail'])
                     rel_type = relation.get('type', relation.get('relation_type', 'UNKNOWN'))
                     if rel_type not in self.relations:
                         self.relations[rel_type] = []
