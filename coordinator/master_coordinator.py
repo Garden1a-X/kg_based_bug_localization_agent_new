@@ -30,7 +30,8 @@ class MasterCoordinator:
         enable_llm_log_analysis: bool = False,
         enable_subgraph_selection: bool = False,
         llm_config: Optional[Dict] = None,
-        path_mappings: Optional[Dict] = None
+        path_mappings: Optional[Dict] = None,
+        verbose: bool = False
     ):
         """
         初始化协调器
@@ -52,6 +53,7 @@ class MasterCoordinator:
         self.base_data_dir = data_dir
         self.enable_subgraph_selection = enable_subgraph_selection
         self.path_mappings = path_mappings or {}
+        self.verbose = verbose
 
         # 如果需要LLM但没有提供客户端，则创建统一的LLM客户端
         if (enable_llm_detection or enable_llm_log_analysis or enable_subgraph_selection) and llm_client is None:
@@ -733,7 +735,8 @@ class MasterCoordinator:
             entities['end_entity'],
             intermediate_entities=entities.get('intermediate_entities', []),
             k=k,
-            error_line=error_line
+            error_line=error_line,
+            debug=self.verbose
         )
         self._display_multiple_chains(paths)
 
@@ -888,7 +891,8 @@ class MasterCoordinator:
             entities['end_entity'],
             intermediate_entities=entities.get('intermediate_entities', []),
             k=k,
-            error_line=error_line
+            error_line=error_line,
+            debug=self.verbose
         )
         self._display_multiple_chains(paths)
 

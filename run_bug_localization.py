@@ -265,7 +265,8 @@ def create_coordinator(args) -> MasterCoordinator:
         enable_llm_log_analysis=args.enable_llm_log_analysis,
         enable_subgraph_selection=args.enable_subgraph_selection,
         llm_config=llm_config,
-        path_mappings=path_mappings if path_mappings else None
+        path_mappings=path_mappings if path_mappings else None,
+        verbose=args.verbose
     )
 
     return coordinator

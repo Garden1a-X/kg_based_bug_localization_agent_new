@@ -577,7 +577,8 @@ class CallChainTracerAgent(BaseAgent):
         intermediate_entities: Optional[List[Dict]] = None,
         max_depth: int = 30,
         k: int = 5,
-        error_line: Optional[int] = None
+        error_line: Optional[int] = None,
+        debug: bool = False
     ) -> List[Dict]:
         """
         追踪Top-K条调用链
@@ -607,7 +608,7 @@ class CallChainTracerAgent(BaseAgent):
             max_depth=max_depth,
             k=k,
             error_line=error_line,
-            debug=False
+            debug=debug
         )
 
         if not paths:
