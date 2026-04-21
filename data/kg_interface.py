@@ -1245,23 +1245,20 @@ class KnowledgeGraphInterface:
             if error_line:
                 print(f"注意: error_line参数已废弃 (传入值: {error_line})")
 
-        # 获取终点的实体
-        end_entity = self.find_function(end)
-        if not end_entity:
+        # 获取终点的所有同名实体（含不同文件的实现）
+        end_entities = self.find_all_functions(end)
+        if not end_entities:
             if debug:
                 print(f"❌ 终点不存在!")
             return []
 
-        end_id = end_entity.get('id')
-        if not end_id:
-            if debug:
-                print(f"❌ 终点没有ID!")
-            return []
-
-        # 标准化终点为实现ID
-        end_id = self.normalize_id(end_id)
-        # 获取终点的等价ID集合
-        end_equivalent_ids = self.get_equivalent_ids(end_id)
+        # 收集所有同名终点的等价 ID 集合
+        end_equivalent_ids = set()
+        for end_entity in end_entities:
+            end_id = end_entity.get('id')
+            if end_id:
+                end_id = self.normalize_id(end_id)
+                end_equivalent_ids.update(self.get_equivalent_ids(end_id))
 
         # 获取起点函数的所有ID（支持多个实现）
         all_start_ids = self.func_name_to_ids.get(start, [])
@@ -1289,8 +1286,9 @@ class KnowledgeGraphInterface:
             print(f"   起点函数名: {start}")
             print(f"   起点实现数量: {len(start_impl_ids)}")
             print(f"   起点IDs: {start_impl_ids}")
-            print(f"   终点ID: {end_id}")
-            print(f"   终点等价ID: {end_equivalent_ids}")
+            print(f"   终点函数名: {end}")
+            print(f"   终点实体数量: {len(end_entities)}")
+            print(f"   终点等价IDs: {end_equivalent_ids}")
 
         # 对每个起点实现分别执行BFS搜索
         from collections import deque
