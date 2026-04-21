@@ -478,7 +478,19 @@ class KnowledgeGraphInterface:
             entity['file'] = entity['source_file']
 
         return entity
-    
+
+    def find_all_functions(self, func_name: str) -> List[Dict]:
+        """
+        查找所有同名函数实体（处理同名函数在不同文件的情况）
+
+        Returns:
+            所有同名函数实体列表
+        """
+        return [
+            e for e in self.entity_by_id.values()
+            if e.get('name') == func_name and e.get('type') == 'FUNCTION'
+        ]
+
     def find_functions_by_pattern(self, pattern: str) -> List[Dict]:
         """
         模糊查找函数
@@ -1374,16 +1386,9 @@ class KnowledgeGraphInterface:
                 callees = self._get_callees_with_lines(current_id, error_line, allow_indirect=allow_indirect_calls)
 
                 for callee_name, callee_line, is_from_indirect in callees:
-                    callee_entity = self.find_function(callee_name)
-                    if not callee_entity:
-                        continue
-
-                    callee_id = callee_entity.get('id')
-                    if not callee_id:
-                        continue
-
-                    callee_id = self.normalize_id(callee_id)
-                    if not callee_id or callee_id in path_ids:  # 避免环路
+                    # 对所有同名实体都入队，避免因同名函数只取其中一个而漏掉正确路径
+                    callee_entities = self.find_all_functions(callee_name)
+                    if not callee_entities:
                         continue
 
                     # 确定边的类型
@@ -1392,16 +1397,25 @@ class KnowledgeGraphInterface:
                     else:
                         edge_type = 'direct'
 
-                    # 添加到队列
-                    # 如果是通过间接调用找到的函数，标记 is_indirect_target=True
-                    # 这样该函数后续只会查找直接调用，避免递归爆炸
-                    queue.append((
-                        callee_id,
-                        path_ids + [callee_id],
-                        edge_types + [edge_type],
-                        call_lines + [callee_line],
-                        is_from_indirect  # 继承间接调用标记
-                    ))
+                    for callee_entity in callee_entities:
+                        callee_id = callee_entity.get('id')
+                        if not callee_id:
+                            continue
+
+                        callee_id = self.normalize_id(callee_id)
+                        if not callee_id or callee_id in path_ids:  # 避免环路
+                            continue
+
+                        # 添加到队列
+                        # 如果是通过间接调用找到的函数，标记 is_indirect_target=True
+                        # 这样该函数后续只会查找直接调用，避免递归爆炸
+                        queue.append((
+                            callee_id,
+                            path_ids + [callee_id],
+                            edge_types + [edge_type],
+                            call_lines + [callee_line],
+                            is_from_indirect  # 继承间接调用标记
+                        ))
 
                     # 检查是否是异步调用函数（只在直接调用时检查）
                     if not is_from_indirect and callee_name in self.async_functions:
@@ -1415,39 +1429,35 @@ class KnowledgeGraphInterface:
                             print(f"  ✅ 找到 {len(async_targets)} 个异步目标，添加到搜索队列")
 
                         for async_target_name, bridge_info in async_targets:
-                            async_target_entity = self.find_function(async_target_name)
-                            if not async_target_entity:
+                            async_target_entities = self.find_all_functions(async_target_name)
+                            if not async_target_entities:
                                 if debug:
                                     print(f"    ⚠️  异步目标 {async_target_name} 未在图谱中找到，跳过")
                                 continue
 
-                            async_target_id = async_target_entity.get('id')
-                            if not async_target_id:
-                                continue
+                            for async_target_entity in async_target_entities:
+                                async_target_id = async_target_entity.get('id')
+                                if not async_target_id:
+                                    continue
 
-                            async_target_id = self.normalize_id(async_target_id)
-                            # 注意：async_target 可能已经在 path 中（避免环路）
-                            # 但 callee 一定不在 path 中（因为上面检查过了）
-                            if not async_target_id or async_target_id in path_ids + [callee_id]:
+                                async_target_id = self.normalize_id(async_target_id)
+                                if not async_target_id or async_target_id in path_ids + [callee_id]:
+                                    if debug:
+                                        print(f"    ⚠️  异步目标 {async_target_name} 已在路径中或无效，跳过")
+                                    continue
+
                                 if debug:
-                                    print(f"    ⚠️  异步目标 {async_target_name} 已在路径中或无效，跳过")
-                                continue
+                                    print(f"    ➕ 添加异步路径: {current_name} -> {callee_name} --[async]--> {async_target_name}")
+                                    print(f"       桥接信息: {bridge_info.get('bridge_entity')} ({bridge_info.get('method')})")
 
-                            if debug:
-                                print(f"    ➕ 添加异步路径: {current_name} -> {callee_name} --[async]--> {async_target_name}")
-                                print(f"       桥接信息: {bridge_info.get('bridge_entity')} ({bridge_info.get('method')})")
-
-                            # 添加异步调用边：current → callee → async_target
-                            # 路径包含两个节点：callee 和 async_target
-                            # 包含两条边：direct 和 async
-                            # 异步调用的目标函数也标记为 is_indirect_target=True（避免继续递归）
-                            queue.append((
-                                async_target_id,
-                                path_ids + [callee_id, async_target_id],
-                                edge_types + ['direct', {'type': 'async', 'bridge': bridge_info}],
-                                call_lines + [callee_line, None],  # 异步调用没有call_line
-                                True  # 异步调用的目标也是间接目标，后续只查找直接调用
-                            ))
+                                # 添加异步调用边：current → callee → async_target
+                                queue.append((
+                                    async_target_id,
+                                    path_ids + [callee_id, async_target_id],
+                                    edge_types + ['direct', {'type': 'async', 'bridge': bridge_info}],
+                                    call_lines + [callee_line, None],  # 异步调用没有call_line
+                                    True  # 异步调用的目标也是间接目标，后续只查找直接调用
+                                ))
 
             # 收集当前起点的所有路径
             all_found_paths.extend(found_paths)
