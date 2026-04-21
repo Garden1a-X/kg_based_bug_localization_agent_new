@@ -1626,18 +1626,22 @@ class KnowledgeGraphInterface:
                     # TODO: 这里可以添加 Mock fallback 逻辑
 
         # 遍历 ioctl_call 关系（直接调用，格式简单，只有 head/tail）
+        # tail 可能是单个 ID 或 ID 列表
         for rel in self.relations.get('ioctl_call', []):
             head_id = rel.get('head')
-            tail_id = rel.get('tail')
+            tail_raw = rel.get('tail')
 
             if head_id not in equivalent_ids:
                 continue
 
-            callee_id_normalized = self.normalize_id(tail_id)
-            callee_entity = self.entity_by_id.get(callee_id_normalized)
+            tail_ids = tail_raw if isinstance(tail_raw, list) else [tail_raw]
 
-            if callee_entity and 'name' in callee_entity:
-                result.append((callee_entity['name'], None, False))  # ioctl_call 没有 call_line
+            for tail_id in tail_ids:
+                callee_id_normalized = self.normalize_id(tail_id)
+                callee_entity = self.entity_by_id.get(callee_id_normalized)
+
+                if callee_entity and 'name' in callee_entity:
+                    result.append((callee_entity['name'], None, False))  # ioctl_call 没有 call_line
 
         return result
 
