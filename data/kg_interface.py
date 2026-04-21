@@ -1385,36 +1385,34 @@ class KnowledgeGraphInterface:
                 allow_indirect_calls = not is_indirect_target
                 callees = self._get_callees_with_lines(current_id, error_line, allow_indirect=allow_indirect_calls)
 
-                for callee_name, callee_line, is_from_indirect in callees:
-                    # 对所有同名实体都入队，避免因同名函数只取其中一个而漏掉正确路径
-                    callee_entities = self.find_all_functions(callee_name)
-                    if not callee_entities:
-                        continue
-
+                for callee_name, callee_line, is_from_indirect, callee_id_exact in callees:
                     # 确定边的类型
                     if is_from_indirect:
                         edge_type = {'type': 'indirect', 'bridge': {'bridge_type': 'function_pointer'}}
                     else:
                         edge_type = 'direct'
 
-                    for callee_entity in callee_entities:
-                        callee_id = callee_entity.get('id')
-                        if not callee_id:
-                            continue
+                    # 直接调用：使用图谱中的精确 ID，避免同名函数导致搜索爆炸
+                    # 间接调用：无精确 ID，对所有同名实体入队（本来就是不确定的）
+                    if callee_id_exact:
+                        candidate_ids = [callee_id_exact]
+                    else:
+                        candidate_ids = [
+                            self.normalize_id(e['id'])
+                            for e in self.find_all_functions(callee_name)
+                            if e.get('id')
+                        ]
 
-                        callee_id = self.normalize_id(callee_id)
+                    for callee_id in candidate_ids:
                         if not callee_id or callee_id in path_ids:  # 避免环路
                             continue
 
-                        # 添加到队列
-                        # 如果是通过间接调用找到的函数，标记 is_indirect_target=True
-                        # 这样该函数后续只会查找直接调用，避免递归爆炸
                         queue.append((
                             callee_id,
                             path_ids + [callee_id],
                             edge_types + [edge_type],
                             call_lines + [callee_line],
-                            is_from_indirect  # 继承间接调用标记
+                            is_from_indirect
                         ))
 
                     # 检查是否是异步调用函数（只在直接调用时检查）
@@ -1441,7 +1439,7 @@ class KnowledgeGraphInterface:
                                     continue
 
                                 async_target_id = self.normalize_id(async_target_id)
-                                if not async_target_id or async_target_id in path_ids + [callee_id]:
+                                if not async_target_id or async_target_id in path_ids + [callee_id_exact]:
                                     if debug:
                                         print(f"    ⚠️  异步目标 {async_target_name} 已在路径中或无效，跳过")
                                     continue
@@ -1453,7 +1451,7 @@ class KnowledgeGraphInterface:
                                 # 添加异步调用边：current → callee → async_target
                                 queue.append((
                                     async_target_id,
-                                    path_ids + [callee_id, async_target_id],
+                                    path_ids + [callee_id_exact, async_target_id],
                                     edge_types + ['direct', {'type': 'async', 'bridge': bridge_info}],
                                     call_lines + [callee_line, None],  # 异步调用没有call_line
                                     True  # 异步调用的目标也是间接目标，后续只查找直接调用
@@ -1561,14 +1559,15 @@ class KnowledgeGraphInterface:
                            设为 False 时，只返回直接调用，用于避免间接调用的递归查询
 
         Returns:
-            [(callee_name, call_line, is_from_indirect), ...] 的列表
+            [(callee_name, call_line, is_from_indirect, callee_id), ...] 的列表
             - callee_name: 被调用函数名
             - call_line: 调用行号（用于路径排序）
             - is_from_indirect: 是否是通过间接调用找到的（True 表示间接调用）
+            - callee_id: 精确的被调函数 ID（直接调用时有值，间接调用时为 None）
 
         注意：
-            - 对于直接调用：is_from_indirect=False
-            - 对于间接调用（函数指针）：查询 ASSIGNED_TO 关系，is_from_indirect=True
+            - 对于直接调用：is_from_indirect=False，callee_id 为图谱中的精确 ID
+            - 对于间接调用（函数指针）：查询 ASSIGNED_TO 关系，is_from_indirect=True，callee_id=None
             - 如果 allow_indirect=False，跳过间接调用的查询
         """
         result = []
@@ -1600,7 +1599,7 @@ class KnowledgeGraphInterface:
                 callee_entity = self.entity_by_id.get(callee_id_normalized)
 
                 if callee_entity and 'name' in callee_entity:
-                    result.append((callee_entity['name'], call_line, False))  # False 表示直接调用
+                    result.append((callee_entity['name'], call_line, False, callee_id_normalized))
 
             # ========== 间接调用（函数指针） ==========
             elif call_type == 'indirect' and target_type == 'FIELD':
@@ -1638,7 +1637,7 @@ class KnowledgeGraphInterface:
                 if candidate_functions:
                     # 将所有候选函数加入结果（过度近似策略）
                     for candidate_name in candidate_functions:
-                        result.append((candidate_name, call_line, True))  # True 表示间接调用
+                        result.append((candidate_name, call_line, True, None))  # 间接调用无精确 ID
                 else:
                     # 如果图谱中没有找到，fallback 到 Mock 数据
                     logger.debug(f"图谱中未找到字段 '{field_name}' 的 ASSIGNED_TO，尝试 Mock 数据")
@@ -1660,7 +1659,7 @@ class KnowledgeGraphInterface:
                 callee_entity = self.entity_by_id.get(callee_id_normalized)
 
                 if callee_entity and 'name' in callee_entity:
-                    result.append((callee_entity['name'], None, False))  # ioctl_call 没有 call_line
+                    result.append((callee_entity['name'], None, False, callee_id_normalized))  # ioctl_call 没有 call_line
 
         return result
 
