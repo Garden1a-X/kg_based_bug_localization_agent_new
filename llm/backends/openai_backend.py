@@ -90,6 +90,9 @@ class OpenAIBackend(BaseLLMBackend):
             )
 
             result = response.choices[0].message.content
+            if result is None:
+                logger.warning("OpenAI 后端返回了空内容（content=None），可能被模型截断或过滤")
+                return None
             logger.debug(f"OpenAI 后端推理成功，生成 {len(result)} 字符")
             return result
 
