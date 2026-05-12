@@ -450,6 +450,7 @@ class LogParserAgent(BaseAgent):
             'raw_log': log_text,
             'line_matches': matching_result.get('line_matches', []),
             'functions': all_functions,  # 所有匹配到的函数
+            'has_precise_log_matches': has_precise_log_matches,
             'error_messages': self._extract_error_messages(log_text),
             'error_codes': self._extract_error_codes(log_text),
             # 初始化入口相关字段（不设置默认值）

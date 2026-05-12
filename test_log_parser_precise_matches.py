@@ -1,4 +1,5 @@
 from agents.log_parser_agent import LogParserAgent
+from agents.entity_locator_agent import EntityLocatorAgent
 
 
 class FakeKG:
@@ -26,6 +27,35 @@ class FakeKG:
             "second_error_func": ["func-2"],
             "call": ["func-call"],
         }
+        self.entities = {
+            "FUNCTION": {
+                "first_error_func": {
+                    "id": "func-1",
+                    "name": "first_error_func",
+                    "type": "FUNCTION",
+                },
+                "second_error_func": {
+                    "id": "func-2",
+                    "name": "second_error_func",
+                    "type": "FUNCTION",
+                },
+                "call": {
+                    "id": "func-call",
+                    "name": "call",
+                    "type": "FUNCTION",
+                },
+            }
+        }
+
+    def find_function(self, func_name):
+        return self.entities["FUNCTION"].get(func_name)
+
+    def find_functions_by_pattern(self, pattern):
+        return [
+            entity
+            for name, entity in self.entities["FUNCTION"].items()
+            if pattern and pattern.lower() in name.lower()
+        ]
 
 
 def test_precise_fail_message_matches_do_not_merge_text_extracted_functions():
@@ -38,8 +68,20 @@ def test_precise_fail_message_matches_do_not_merge_text_extracted_functions():
 
     assert result["functions"] == ["first_error_func", "second_error_func"]
     assert result["key_functions"] == ["first_error_func", "second_error_func"]
+    assert result["has_precise_log_matches"] is True
     assert "call" not in result["functions"]
     assert result["inferred_error_point"] == "first_error_func"
     assert result["inferred_entry"] is None
     assert result["need_more_info"] is False
     assert result["fallback_mode"] is False
+
+
+def test_precise_fail_message_matches_do_not_backfill_start_from_log_functions():
+    kg = FakeKG()
+    parser = LogParserAgent(enable_llm=False, kg_interface=kg)
+    parsed = parser.parse_log("first failure\nsecond failure")
+
+    entities = EntityLocatorAgent(kg).execute(parsed)
+
+    assert entities["start_entity"] is None
+    assert entities["end_entity"]["name"] == "first_error_func"
