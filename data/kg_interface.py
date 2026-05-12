@@ -1218,7 +1218,9 @@ class KnowledgeGraphInterface:
         max_depth: int = 30,
         k: int = 5,
         error_line: Optional[int] = None,
-        debug: bool = False
+        debug: bool = False,
+        preferred_start_id: Optional[str] = None,
+        preferred_end_id: Optional[str] = None
     ) -> List[Dict]:
         """
         查找Top-K条调用路径（支持间接调用和call_line排序）
@@ -1230,6 +1232,8 @@ class KnowledgeGraphInterface:
             k: 返回路径数量上限
             error_line: 已废弃（保留用于兼容性，不再用于剪枝）
             debug: 是否输出调试信息
+            preferred_start_id: 指定起点实体ID（可选），用于消除同名函数歧义
+            preferred_end_id: 指定终点实体ID（可选），用于消除同名函数歧义
 
         Returns:
             路径列表，每个路径包含 path, edges, score, avg_call_line 等信息
@@ -1245,8 +1249,13 @@ class KnowledgeGraphInterface:
             if error_line:
                 print(f"注意: error_line参数已废弃 (传入值: {error_line})")
 
-        # 获取终点的所有同名实体（含不同文件的实现）
-        end_entities = self.find_all_functions(end)
+        # 获取终点候选实体（支持优先指定ID）
+        if preferred_end_id:
+            preferred_end_id = self.normalize_id(str(preferred_end_id))
+            preferred_end_entity = self.entity_by_id.get(preferred_end_id)
+            end_entities = [preferred_end_entity] if preferred_end_entity else []
+        else:
+            end_entities = self.find_all_functions(end)
         if not end_entities:
             if debug:
                 print(f"❌ 终点不存在!")
@@ -1260,8 +1269,12 @@ class KnowledgeGraphInterface:
                 end_id = self.normalize_id(end_id)
                 end_equivalent_ids.update(self.get_equivalent_ids(end_id))
 
-        # 获取起点函数的所有ID（支持多个实现）
-        all_start_ids = self.func_name_to_ids.get(start, [])
+        # 获取起点候选ID（支持优先指定ID）
+        if preferred_start_id:
+            preferred_start_id = self.normalize_id(str(preferred_start_id))
+            all_start_ids = [preferred_start_id] if preferred_start_id in self.entity_by_id else []
+        else:
+            all_start_ids = self.func_name_to_ids.get(start, [])
         if not all_start_ids:
             if debug:
                 print(f"❌ 起点不存在!")
@@ -1286,9 +1299,13 @@ class KnowledgeGraphInterface:
             print(f"   起点函数名: {start}")
             print(f"   起点实现数量: {len(start_impl_ids)}")
             print(f"   起点IDs: {start_impl_ids}")
+            if preferred_start_id:
+                print(f"   指定起点ID: {preferred_start_id}")
             print(f"   终点函数名: {end}")
             print(f"   终点实体数量: {len(end_entities)}")
             print(f"   终点等价IDs: {end_equivalent_ids}")
+            if preferred_end_id:
+                print(f"   指定终点ID: {preferred_end_id}")
 
         # 对每个起点实现分别执行BFS搜索
         from collections import deque

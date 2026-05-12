@@ -57,6 +57,10 @@ class CallChainTracerAgent(BaseAgent):
         """
         start_name = start_entity['name']
         end_name = end_entity['name']
+        start_id = start_entity.get('id')
+        end_id = end_entity.get('id')
+        start_id = start_entity.get('id')
+        end_id = end_entity.get('id')
 
         self.log_start(f"追踪调用链: {start_name} -> {end_name}")
 
@@ -608,7 +612,9 @@ class CallChainTracerAgent(BaseAgent):
             max_depth=max_depth,
             k=k,
             error_line=error_line,
-            debug=debug
+            debug=debug,
+            preferred_start_id=start_id,
+            preferred_end_id=end_id
         )
 
         if not paths:
