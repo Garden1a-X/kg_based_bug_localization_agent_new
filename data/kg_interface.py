@@ -1638,10 +1638,13 @@ class KnowledgeGraphInterface:
 
         seen_path_keys = seen_path_keys if seen_path_keys is not None else set()
         found_paths = []
+        combined_max_depth = max_depth * 2 - 1
         forward_queue = deque()
         backward_queue = deque()
         forward_seen = {}
         backward_seen = {}
+        forward_expanded = 0
+        backward_expanded = 0
 
         for start_id in start_impl_ids:
             start_id = self.normalize_id(start_id)
@@ -1674,7 +1677,7 @@ class KnowledgeGraphInterface:
             forward_state = forward_seen[meet_id]
             backward_state = backward_seen[meet_id]
             path_ids = forward_state['path_ids'] + backward_state['path_ids'][1:]
-            if len(path_ids) > max_depth:
+            if len(path_ids) > combined_max_depth:
                 return
             edge_types = forward_state['edges'] + backward_state['edges']
             call_lines = forward_state['call_lines'] + backward_state['call_lines']
@@ -1693,11 +1696,14 @@ class KnowledgeGraphInterface:
         for meet_id in list(forward_seen):
             try_combine(meet_id)
 
-        while forward_queue and backward_queue and len(found_paths) < k:
-            expand_forward = len(forward_queue) <= len(backward_queue)
+        while (forward_queue or backward_queue) and len(found_paths) < k:
+            expand_forward = bool(forward_queue) and (
+                not backward_queue or len(forward_queue) <= len(backward_queue)
+            )
 
             if expand_forward:
                 current_id = forward_queue.popleft()
+                forward_expanded += 1
                 current_state = forward_seen[current_id]
                 if len(current_state['path_ids']) >= max_depth:
                     continue
@@ -1742,6 +1748,7 @@ class KnowledgeGraphInterface:
                         break
             else:
                 current_id = backward_queue.popleft()
+                backward_expanded += 1
                 current_state = backward_seen[current_id]
                 if len(current_state['path_ids']) >= max_depth:
                     continue
@@ -1781,7 +1788,59 @@ class KnowledgeGraphInterface:
                         break
 
         found_paths.sort(key=lambda x: x['score'], reverse=True)
+        if debug:
+            if not found_paths:
+                same_name_misses = self._find_same_name_bidirectional_misses(forward_seen, backward_seen)
+                if same_name_misses:
+                    print("⚠️ 双向搜索发现同名但不同ID的候选相遇点:")
+                    for miss in same_name_misses[:5]:
+                        print(
+                            f"   {miss['name']}: "
+                            f"正向ID={miss['forward_id']} @{miss['forward_file']} ; "
+                            f"反向ID={miss['backward_id']} @{miss['backward_file']}"
+                        )
+                    if len(same_name_misses) > 5:
+                        print(f"   ... 还有 {len(same_name_misses) - 5} 个同名不同ID候选")
+            print(
+                "📊 双向搜索统计: "
+                f"正向访问={len(forward_seen)} (展开={forward_expanded}), "
+                f"反向访问={len(backward_seen)} (展开={backward_expanded}), "
+                f"组合最大长度={combined_max_depth}, "
+                f"找到路径={len(found_paths)}"
+            )
         return found_paths[:k]
+
+    def _find_same_name_bidirectional_misses(self, forward_seen: Dict, backward_seen: Dict) -> List[Dict]:
+        """查找双向搜索中同名但不同ID的近似相遇点，用于诊断同名函数歧义。"""
+        forward_by_name = {}
+        for entity_id in forward_seen:
+            entity = self.entity_by_id.get(entity_id)
+            if entity and entity.get('name'):
+                forward_by_name.setdefault(entity['name'], []).append(entity_id)
+
+        backward_by_name = {}
+        for entity_id in backward_seen:
+            entity = self.entity_by_id.get(entity_id)
+            if entity and entity.get('name'):
+                backward_by_name.setdefault(entity['name'], []).append(entity_id)
+
+        misses = []
+        for name in sorted(set(forward_by_name) & set(backward_by_name)):
+            for forward_id in forward_by_name[name]:
+                for backward_id in backward_by_name[name]:
+                    if forward_id == backward_id:
+                        continue
+                    forward_entity = self.entity_by_id.get(forward_id, {})
+                    backward_entity = self.entity_by_id.get(backward_id, {})
+                    misses.append({
+                        'name': name,
+                        'forward_id': forward_id,
+                        'forward_file': forward_entity.get('source_file', 'unknown'),
+                        'backward_id': backward_id,
+                        'backward_file': backward_entity.get('source_file', 'unknown')
+                    })
+
+        return misses
 
     def query_assigned_to_by_field_name(self, field_name: str) -> List[str]:
         """

@@ -150,3 +150,72 @@ def test_bidirectional_search_stitches_long_direct_chain():
     assert paths[0]["path"] == [node_id.upper() for node_id in node_ids]
     assert paths[0]["call_lines"] == [1, 2, 3, 4, 5, 6]
     assert paths[0]["method"] == "bidirectional_search"
+
+
+def test_bidirectional_fallback_allows_combined_path_beyond_single_side_depth():
+    kg = KnowledgeGraphInterface.__new__(KnowledgeGraphInterface)
+    node_ids = ["a", "n1", "n2", "n3", "n4", "n5", "b", "n6", "n7", "n8", "c"]
+    kg.entity_by_id = {
+        node_id: {"id": node_id, "name": node_id.upper(), "type": "FUNCTION"}
+        for node_id in node_ids
+    }
+    kg.func_name_to_ids = {node_id.upper(): [node_id] for node_id in node_ids}
+    kg.entities = {"FUNCTION": {}}
+    kg.relations = {
+        "CALLS": [
+            {"head": src, "tail": dst, "type": "CALLS", "call_line": idx + 1}
+            for idx, (src, dst) in enumerate(zip(node_ids, node_ids[1:]))
+        ]
+    }
+    kg.decl_to_impl = {}
+    kg.impl_to_decl = {}
+    kg.async_functions = set()
+    kg.async_call_cache = {}
+    kg.llm_indirect_call_cache = {}
+    kg._build_call_graph_with_lines()
+
+    paths = kg.find_top_k_call_paths_with_indirect(
+        "A",
+        "C",
+        max_depth=7,
+        k=1,
+        preferred_start_id="a",
+        preferred_end_id="c",
+    )
+
+    assert len(paths) == 1
+    assert paths[0]["path_ids"] == node_ids
+    assert paths[0]["method"] == "bidirectional_search"
+
+
+def test_bidirectional_diagnostics_report_same_name_different_ids():
+    kg = KnowledgeGraphInterface.__new__(KnowledgeGraphInterface)
+    kg.entity_by_id = {
+        "b-forward": {
+            "id": "b-forward",
+            "name": "B",
+            "type": "FUNCTION",
+            "source_file": "forward.c",
+        },
+        "b-backward": {
+            "id": "b-backward",
+            "name": "B",
+            "type": "FUNCTION",
+            "source_file": "backward.c",
+        },
+    }
+
+    misses = kg._find_same_name_bidirectional_misses(
+        {"b-forward": {"path_ids": ["b-forward"]}},
+        {"b-backward": {"path_ids": ["b-backward"]}},
+    )
+
+    assert misses == [
+        {
+            "name": "B",
+            "forward_id": "b-forward",
+            "forward_file": "forward.c",
+            "backward_id": "b-backward",
+            "backward_file": "backward.c",
+        }
+    ]
