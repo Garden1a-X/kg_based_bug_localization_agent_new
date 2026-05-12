@@ -738,6 +738,53 @@ class MasterCoordinator:
             error_line=error_line,
             debug=self.verbose
         )
+
+        # 回退策略：处理同名函数多实例导致的定位歧义
+        # 场景：起点/终点函数名在图中有多个实体，默认定位到的实例无法连通
+        if not paths:
+            start_name = start_func
+            end_name = end_func
+            start_candidates = self.kg.find_all_functions(start_name) if start_name else []
+            end_candidates = self.kg.find_all_functions(end_name) if end_name else []
+
+            # 仅在存在多候选时触发，避免额外开销
+            if len(start_candidates) > 1 or len(end_candidates) > 1:
+                logger.info(
+                    f"触发同名函数多实例回退搜索: start候选={len(start_candidates)}, "
+                    f"end候选={len(end_candidates)}"
+                )
+
+                # 如果只有一个候选，也统一纳入组合逻辑
+                if not start_candidates and entities.get('start_entity'):
+                    start_candidates = [entities['start_entity']]
+                if not end_candidates and entities.get('end_entity'):
+                    end_candidates = [entities['end_entity']]
+
+                for s in start_candidates:
+                    for e in end_candidates:
+                        if not s or not e:
+                            continue
+                        logger.info(
+                            f"尝试候选组合: {s.get('name')}[{s.get('id')}] -> "
+                            f"{e.get('name')}[{e.get('id')}]"
+                        )
+                        candidate_paths = self.chain_tracer.execute_top_k(
+                            s,
+                            e,
+                            intermediate_entities=entities.get('intermediate_entities', []),
+                            k=k,
+                            error_line=error_line,
+                            debug=self.verbose
+                        )
+                        if candidate_paths:
+                            entities['start_entity'] = s
+                            entities['end_entity'] = e
+                            paths = candidate_paths
+                            logger.info("同名函数回退搜索成功，已找到路径")
+                            break
+                    if paths:
+                        break
+
         self._display_multiple_chains(paths)
 
         # 第4步：生成报告
@@ -894,6 +941,47 @@ class MasterCoordinator:
             error_line=error_line,
             debug=self.verbose
         )
+
+        # 回退策略：处理同名函数多实例导致的定位歧义
+        if not paths:
+            start_candidates = self.kg.find_all_functions(start_func) if start_func else []
+            end_candidates = self.kg.find_all_functions(end_func) if end_func else []
+
+            if len(start_candidates) > 1 or len(end_candidates) > 1:
+                logger.info(
+                    f"[手动模式] 触发同名函数多实例回退搜索: start候选={len(start_candidates)}, "
+                    f"end候选={len(end_candidates)}"
+                )
+
+                if not start_candidates and entities.get('start_entity'):
+                    start_candidates = [entities['start_entity']]
+                if not end_candidates and entities.get('end_entity'):
+                    end_candidates = [entities['end_entity']]
+
+                for s in start_candidates:
+                    for e in end_candidates:
+                        if not s or not e:
+                            continue
+                        logger.info(
+                            f"[手动模式] 尝试候选组合: {s.get('name')}[{s.get('id')}] -> "
+                            f"{e.get('name')}[{e.get('id')}]"
+                        )
+                        candidate_paths = self.chain_tracer.execute_top_k(
+                            s,
+                            e,
+                            intermediate_entities=entities.get('intermediate_entities', []),
+                            k=k,
+                            error_line=error_line,
+                            debug=self.verbose
+                        )
+                        if candidate_paths:
+                            entities['start_entity'] = s
+                            entities['end_entity'] = e
+                            paths = candidate_paths
+                            logger.info("[手动模式] 同名函数回退搜索成功，已找到路径")
+                            break
+                    if paths:
+                        break
         self._display_multiple_chains(paths)
 
         # 生成报告
