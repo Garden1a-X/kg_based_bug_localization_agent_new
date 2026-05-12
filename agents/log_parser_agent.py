@@ -375,14 +375,16 @@ class LogParserAgent(BaseAgent):
                 if func_name and func_name not in result['all_functions']:
                     result['all_functions'].append(func_name)
 
-        # 补充：从日志文本中提取显式的函数名（防止遗漏）
-        extracted_funcs = self._extract_function_names_from_log(log_text)
-        if extracted_funcs:
-            self.log_info(f"从日志文本中提取到 {len(extracted_funcs)} 个函数名: {extracted_funcs[:5]}...")
-            # 合并到结果中（去重）
-            for func in extracted_funcs:
-                if func not in result['all_functions']:
-                    result['all_functions'].append(func)
+        # 只有在没有任何 FAIL_MESSAGE 精确匹配时，才从自由文本里补充函数名。
+        # 已匹配到日志行时，文本提取容易把普通词（如 call）误当成关键函数。
+        if not result['line_matches']:
+            extracted_funcs = self._extract_function_names_from_log(log_text)
+            if extracted_funcs:
+                self.log_info(f"从日志文本中提取到 {len(extracted_funcs)} 个函数名: {extracted_funcs[:5]}...")
+                # 合并到结果中（去重）
+                for func in extracted_funcs:
+                    if func not in result['all_functions']:
+                        result['all_functions'].append(func)
 
         return result
 
@@ -438,6 +440,7 @@ class LogParserAgent(BaseAgent):
         # 提取关键函数
         all_functions = matching_result.get('all_functions', [])
         matched_count = len(matching_result.get('line_matches', []))
+        has_precise_log_matches = matched_count > 0
 
         self.log_success(f"匹配到 {matched_count} 行日志")
         self.log_info(f"涉及函数: {all_functions}")
@@ -503,8 +506,16 @@ class LogParserAgent(BaseAgent):
 
         # 降级处理：如果LLM没有给出入口或置信度太低
         if not result['inferred_entry'] or result['entry_confidence'] < 0.6:
+            # 如果已经通过 FAIL_MESSAGE 精确匹配到日志函数，不再把日志函数列表最后一个
+            # 当作入口。日志匹配函数更适合作为错误点/关键函数，入口应由用户或LLM提供。
+            if has_precise_log_matches:
+                result['inferred_entry'] = None
+                result['entry_confidence'] = 0.0
+                result['need_more_info'] = False
+                result['fallback_mode'] = False
+                self.log_info("已通过FAIL_MESSAGE匹配定位日志函数，跳过入口降级推断")
             # 使用日志中最上层的函数作为降级入口
-            if all_functions:
+            elif all_functions:
                 result['inferred_entry'] = all_functions[-1]  # 日志函数列表最后一个
                 result['entry_confidence'] = 0.3  # 标记为低置信度
                 result['need_more_info'] = True

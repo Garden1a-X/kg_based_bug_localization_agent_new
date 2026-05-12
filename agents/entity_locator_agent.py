@@ -33,11 +33,11 @@ class EntityLocatorAgent(BaseAgent):
         }
         
         # 1. 定位起点（入口函数）
-        if 'inferred_entry' in parsed_log:
+        if parsed_log.get('inferred_entry'):
             result['start_entity'] = self._locate_function(parsed_log['inferred_entry'])
         
         # 2. 定位终点（错误点）
-        if 'inferred_error_point' in parsed_log:
+        if parsed_log.get('inferred_error_point'):
             result['end_entity'] = self._locate_function(parsed_log['inferred_error_point'])
         
         # 3. 如果有关键函数，定位它们
@@ -100,6 +100,9 @@ class EntityLocatorAgent(BaseAgent):
         Returns:
             函数信息，如果不存在返回None
         """
+        if not func_name:
+            return None
+
         # 1. 精确匹配
         entity = self.kg.find_function(func_name)
         if entity:
