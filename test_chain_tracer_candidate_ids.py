@@ -114,3 +114,39 @@ def test_top_k_deduplicates_identical_paths_from_duplicate_edges():
     assert len(paths) == 1
     assert paths[0]["path_ids"] == ["start", "mid", "end"]
     assert paths[0]["call_lines"] == [10, 20]
+
+
+def test_bidirectional_search_stitches_long_direct_chain():
+    kg = KnowledgeGraphInterface.__new__(KnowledgeGraphInterface)
+    node_ids = ["a", "n1", "n2", "n3", "n4", "n5", "c"]
+    kg.entity_by_id = {
+        node_id: {"id": node_id, "name": node_id.upper(), "type": "FUNCTION"}
+        for node_id in node_ids
+    }
+    kg.func_name_to_ids = {node_id.upper(): [node_id] for node_id in node_ids}
+    kg.entities = {"FUNCTION": {}}
+    kg.relations = {
+        "CALLS": [
+            {"head": src, "tail": dst, "type": "CALLS", "call_line": idx + 1}
+            for idx, (src, dst) in enumerate(zip(node_ids, node_ids[1:]))
+        ]
+    }
+    kg.decl_to_impl = {}
+    kg.impl_to_decl = {}
+    kg.async_functions = set()
+    kg.async_call_cache = {}
+    kg.llm_indirect_call_cache = {}
+    kg._build_call_graph_with_lines()
+
+    paths = kg._find_bidirectional_call_paths(
+        start_impl_ids=["a"],
+        end_equivalent_ids={"c"},
+        max_depth=10,
+        k=1,
+    )
+
+    assert len(paths) == 1
+    assert paths[0]["path_ids"] == node_ids
+    assert paths[0]["path"] == [node_id.upper() for node_id in node_ids]
+    assert paths[0]["call_lines"] == [1, 2, 3, 4, 5, 6]
+    assert paths[0]["method"] == "bidirectional_search"

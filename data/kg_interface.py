@@ -58,8 +58,11 @@ class KnowledgeGraphInterface:
         # {caller_id: [(callee_id, call_line), ...]}
         self.call_graph_with_lines = {}
         self.calls_by_head = {}
+        self.calls_by_tail = {}
         self.ioctl_calls_by_head = {}
+        self.ioctl_calls_by_tail = {}
         self._callees_with_lines_cache = {}
+        self._callers_with_lines_cache = {}
 
         # LLM间接调用检测缓存（函数指针）
         # {func_name: [(target_func, bridge_info), ...]}
@@ -246,8 +249,11 @@ class KnowledgeGraphInterface:
         """构建包含行号信息的调用图"""
         self.call_graph_with_lines = {}
         self.calls_by_head = {}
+        self.calls_by_tail = {}
         self.ioctl_calls_by_head = {}
+        self.ioctl_calls_by_tail = {}
         self._callees_with_lines_cache = {}
+        self._callers_with_lines_cache = {}
 
         for rel in self.relations.get('CALLS', []):
             caller_id = rel.get('head')
@@ -258,6 +264,9 @@ class KnowledgeGraphInterface:
                 continue
 
             self.calls_by_head.setdefault(caller_id, []).append(rel)
+            callee_ids = callee_id if isinstance(callee_id, list) else [callee_id]
+            for tail_id in callee_ids:
+                self.calls_by_tail.setdefault(tail_id, []).append(rel)
 
             if caller_id not in self.call_graph_with_lines:
                 self.call_graph_with_lines[caller_id] = []
@@ -271,6 +280,11 @@ class KnowledgeGraphInterface:
             caller_id = rel.get('head')
             if caller_id:
                 self.ioctl_calls_by_head.setdefault(caller_id, []).append(rel)
+            tail_raw = rel.get('tail')
+            tail_ids = tail_raw if isinstance(tail_raw, list) else [tail_raw]
+            for tail_id in tail_ids:
+                if tail_id:
+                    self.ioctl_calls_by_tail.setdefault(tail_id, []).append(rel)
 
         logger.info(f"  ✓ 构建调用图（含行号）: {len(self.call_graph_with_lines)} 个调用者")
 
@@ -1523,6 +1537,20 @@ class KnowledgeGraphInterface:
                 else:
                     print(f"   ❌ 从该起点未找到路径")
 
+        if not all_found_paths:
+            if debug:
+                print("🔁 正向搜索未找到路径，尝试双向搜索...")
+            bidirectional_paths = self._find_bidirectional_call_paths(
+                start_impl_ids=start_impl_ids,
+                end_equivalent_ids=end_equivalent_ids,
+                max_depth=max_depth,
+                k=k,
+                error_line=error_line,
+                seen_path_keys=seen_path_keys,
+                debug=debug
+            )
+            all_found_paths.extend(bidirectional_paths)
+
         # 合并所有起点的路径，按得分排序
         all_found_paths.sort(key=lambda x: x['score'], reverse=True)
 
@@ -1540,6 +1568,220 @@ class KnowledgeGraphInterface:
             print(f"{'='*80}\n")
 
         return all_found_paths[:k]
+
+    def _build_path_result(
+        self,
+        path_ids: List[str],
+        edge_types: List,
+        call_lines: List[Optional[int]]
+    ) -> Optional[Dict]:
+        """将ID路径转换为统一的Top-K路径结果。"""
+        path_names = []
+        for entity_id in path_ids:
+            entity = self.entity_by_id.get(entity_id)
+            if not entity:
+                return None
+            path_names.append(entity['name'])
+
+        indirect_count = sum(1 for edge in edge_types if isinstance(edge, dict))
+        valid_call_lines = [line for line in call_lines if line is not None]
+        avg_call_line = sum(valid_call_lines) / len(valid_call_lines) if valid_call_lines else 0
+        current_depth = len(path_ids)
+        score = 1000 - current_depth - indirect_count * 10 - avg_call_line / 100
+
+        return {
+            'path': path_names,
+            'path_ids': path_ids,
+            'edges': edge_types,
+            'call_lines': call_lines,
+            'score': score,
+            'length': current_depth,
+            'indirect_count': indirect_count,
+            'avg_call_line': avg_call_line
+        }
+
+    def _path_result_key(self, path_ids: List[str], edge_types: List, call_lines: List[Optional[int]]) -> tuple:
+        """生成路径去重键。"""
+        def edge_signature(edge):
+            if not isinstance(edge, dict):
+                return edge
+            bridge = edge.get('bridge') or {}
+            return (
+                edge.get('type'),
+                bridge.get('bridge_type'),
+                bridge.get('bridge_entity'),
+                bridge.get('method')
+            )
+
+        return (
+            tuple(path_ids),
+            tuple(edge_signature(edge) for edge in edge_types),
+            tuple(call_lines)
+        )
+
+    def _find_bidirectional_call_paths(
+        self,
+        start_impl_ids: List[str],
+        end_equivalent_ids: set,
+        max_depth: int,
+        k: int,
+        error_line: Optional[int] = None,
+        seen_path_keys: Optional[set] = None,
+        debug: bool = False
+    ) -> List[Dict]:
+        """
+        双向BFS兜底搜索。
+
+        正向侧沿 callee 展开，反向侧沿 caller 展开；两边在同一函数ID相遇时拼接路径。
+        """
+        from collections import deque
+
+        seen_path_keys = seen_path_keys if seen_path_keys is not None else set()
+        found_paths = []
+        forward_queue = deque()
+        backward_queue = deque()
+        forward_seen = {}
+        backward_seen = {}
+
+        for start_id in start_impl_ids:
+            start_id = self.normalize_id(start_id)
+            if not start_id or start_id not in self.entity_by_id:
+                continue
+            state = {
+                'path_ids': [start_id],
+                'edges': [],
+                'call_lines': [],
+                'is_indirect_target': False
+            }
+            forward_queue.append(start_id)
+            forward_seen[start_id] = state
+
+        for end_id in end_equivalent_ids:
+            end_id = self.normalize_id(end_id)
+            if not end_id or end_id not in self.entity_by_id:
+                continue
+            state = {
+                'path_ids': [end_id],
+                'edges': [],
+                'call_lines': []
+            }
+            backward_queue.append(end_id)
+            backward_seen[end_id] = state
+
+        def try_combine(meet_id):
+            if meet_id not in forward_seen or meet_id not in backward_seen:
+                return
+            forward_state = forward_seen[meet_id]
+            backward_state = backward_seen[meet_id]
+            path_ids = forward_state['path_ids'] + backward_state['path_ids'][1:]
+            if len(path_ids) > max_depth:
+                return
+            edge_types = forward_state['edges'] + backward_state['edges']
+            call_lines = forward_state['call_lines'] + backward_state['call_lines']
+            path_key = self._path_result_key(path_ids, edge_types, call_lines)
+            if path_key in seen_path_keys:
+                return
+            path_result = self._build_path_result(path_ids, edge_types, call_lines)
+            if not path_result:
+                return
+            seen_path_keys.add(path_key)
+            path_result['method'] = 'bidirectional_search'
+            found_paths.append(path_result)
+            if debug:
+                print(f"✅ 双向搜索相遇: {self.entity_by_id[meet_id].get('name')}，路径长度={len(path_ids)}")
+
+        for meet_id in list(forward_seen):
+            try_combine(meet_id)
+
+        while forward_queue and backward_queue and len(found_paths) < k:
+            expand_forward = len(forward_queue) <= len(backward_queue)
+
+            if expand_forward:
+                current_id = forward_queue.popleft()
+                current_state = forward_seen[current_id]
+                if len(current_state['path_ids']) >= max_depth:
+                    continue
+
+                callees = self._get_callees_with_lines(
+                    current_id,
+                    error_line,
+                    allow_indirect=not current_state.get('is_indirect_target', False)
+                )
+                for callee_name, callee_line, is_from_indirect, callee_id_exact in callees:
+                    edge_type = {'type': 'indirect', 'bridge': {'bridge_type': 'function_pointer'}} if is_from_indirect else 'direct'
+                    if callee_id_exact:
+                        candidate_ids = [callee_id_exact]
+                    else:
+                        candidate_ids = [
+                            self.normalize_id(entity['id'])
+                            for entity in self.find_all_functions(callee_name)
+                            if entity.get('id')
+                        ]
+                    candidate_ids = list(dict.fromkeys(candidate_ids))
+
+                    for callee_id in candidate_ids:
+                        if not callee_id or callee_id in current_state['path_ids']:
+                            continue
+                        if callee_id in forward_seen:
+                            continue
+
+                        new_state = {
+                            'path_ids': current_state['path_ids'] + [callee_id],
+                            'edges': current_state['edges'] + [edge_type],
+                            'call_lines': current_state['call_lines'] + [callee_line],
+                            'is_indirect_target': is_from_indirect
+                        }
+                        if len(new_state['path_ids']) > max_depth:
+                            continue
+                        forward_seen[callee_id] = new_state
+                        forward_queue.append(callee_id)
+                        try_combine(callee_id)
+                        if len(found_paths) >= k:
+                            break
+                    if len(found_paths) >= k:
+                        break
+            else:
+                current_id = backward_queue.popleft()
+                current_state = backward_seen[current_id]
+                if len(current_state['path_ids']) >= max_depth:
+                    continue
+
+                for caller_name, call_line, is_from_indirect, caller_id_exact in self._get_callers_with_lines(current_id):
+                    if is_from_indirect:
+                        continue
+                    if caller_id_exact:
+                        candidate_ids = [caller_id_exact]
+                    else:
+                        candidate_ids = [
+                            self.normalize_id(entity['id'])
+                            for entity in self.find_all_functions(caller_name)
+                            if entity.get('id')
+                        ]
+                    candidate_ids = list(dict.fromkeys(candidate_ids))
+
+                    for caller_id in candidate_ids:
+                        if not caller_id or caller_id in current_state['path_ids']:
+                            continue
+                        if caller_id in backward_seen:
+                            continue
+
+                        new_state = {
+                            'path_ids': [caller_id] + current_state['path_ids'],
+                            'edges': ['direct'] + current_state['edges'],
+                            'call_lines': [call_line] + current_state['call_lines']
+                        }
+                        if len(new_state['path_ids']) > max_depth:
+                            continue
+                        backward_seen[caller_id] = new_state
+                        backward_queue.append(caller_id)
+                        try_combine(caller_id)
+                        if len(found_paths) >= k:
+                            break
+                    if len(found_paths) >= k:
+                        break
+
+        found_paths.sort(key=lambda x: x['score'], reverse=True)
+        return found_paths[:k]
 
     def query_assigned_to_by_field_name(self, field_name: str) -> List[str]:
         """
@@ -1739,6 +1981,81 @@ class KnowledgeGraphInterface:
                         add_result(callee_entity['name'], None, False, callee_id_normalized)  # ioctl_call 没有 call_line
 
         self._callees_with_lines_cache[cache_key] = list(result)
+        return result
+
+    def _get_callers_with_lines(self, func_id: str) -> List[Tuple[str, Optional[int], bool, Optional[str]]]:
+        """
+        获取函数的调用者及调用行号（反向搜索使用）。
+
+        Returns:
+            [(caller_name, call_line, is_from_indirect, caller_id), ...]
+        """
+        func_id = self.normalize_id(str(func_id))
+        if not hasattr(self, '_callers_with_lines_cache'):
+            self._callers_with_lines_cache = {}
+        if func_id in self._callers_with_lines_cache:
+            return list(self._callers_with_lines_cache[func_id])
+
+        result = []
+        seen = set()
+
+        def add_result(caller_name, call_line, is_from_indirect, caller_id):
+            key = (caller_name, call_line, is_from_indirect, caller_id)
+            if key in seen:
+                return
+            seen.add(key)
+            result.append((caller_name, call_line, is_from_indirect, caller_id))
+
+        equivalent_ids = self.get_equivalent_ids(func_id)
+
+        if not hasattr(self, 'calls_by_tail'):
+            self.calls_by_tail = {}
+        calls_by_tail = self.calls_by_tail
+        if not calls_by_tail and self.relations.get('CALLS'):
+            for rel in self.relations.get('CALLS', []):
+                tail_raw = rel.get('tail')
+                tail_ids = tail_raw if isinstance(tail_raw, list) else [tail_raw]
+                for tail_id in tail_ids:
+                    if tail_id:
+                        calls_by_tail.setdefault(tail_id, []).append(rel)
+
+        for tail_id in equivalent_ids:
+            for rel in calls_by_tail.get(tail_id, []):
+                call_type = rel.get('call_type', 'direct')
+                target_type = rel.get('target_type', 'FUNCTION')
+                if call_type != 'direct' and target_type != 'FUNCTION':
+                    continue
+
+                head_id = rel.get('head')
+                if not head_id:
+                    continue
+                caller_id_normalized = self.normalize_id(head_id)
+                caller_entity = self.entity_by_id.get(caller_id_normalized)
+                if caller_entity and 'name' in caller_entity:
+                    add_result(caller_entity['name'], rel.get('call_line'), False, caller_id_normalized)
+
+        if not hasattr(self, 'ioctl_calls_by_tail'):
+            self.ioctl_calls_by_tail = {}
+        ioctl_calls_by_tail = self.ioctl_calls_by_tail
+        if not ioctl_calls_by_tail and self.relations.get('ioctl_call'):
+            for rel in self.relations.get('ioctl_call', []):
+                tail_raw = rel.get('tail')
+                tail_ids = tail_raw if isinstance(tail_raw, list) else [tail_raw]
+                for tail_id in tail_ids:
+                    if tail_id:
+                        ioctl_calls_by_tail.setdefault(tail_id, []).append(rel)
+
+        for tail_id in equivalent_ids:
+            for rel in ioctl_calls_by_tail.get(tail_id, []):
+                head_id = rel.get('head')
+                if not head_id:
+                    continue
+                caller_id_normalized = self.normalize_id(head_id)
+                caller_entity = self.entity_by_id.get(caller_id_normalized)
+                if caller_entity and 'name' in caller_entity:
+                    add_result(caller_entity['name'], None, False, caller_id_normalized)
+
+        self._callers_with_lines_cache[func_id] = list(result)
         return result
 
     def find_reachable_from_start(self, start: str, max_depth: int = 10) -> Dict[str, List[str]]:
