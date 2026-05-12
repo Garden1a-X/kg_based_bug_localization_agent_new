@@ -508,13 +508,19 @@ class LogParserAgent(BaseAgent):
         # 降级处理：如果LLM没有给出入口或置信度太低
         if not result['inferred_entry'] or result['entry_confidence'] < 0.6:
             # 如果已经通过 FAIL_MESSAGE 精确匹配到日志函数，不再把日志函数列表最后一个
-            # 当作入口。日志匹配函数更适合作为错误点/关键函数，入口应由用户或LLM提供。
+            # 当作自由文本降级入口。多条精准匹配日志本身有顺序含义：第一个作为
+            # 错误点，最后一个作为日志可见的最上游函数。
             if has_precise_log_matches:
-                result['inferred_entry'] = None
-                result['entry_confidence'] = 0.0
+                if len(all_functions) > 1:
+                    result['inferred_entry'] = all_functions[-1]
+                    result['entry_confidence'] = 0.6
+                    self.log_info(f"使用精准匹配日志序列推断入口: {result['inferred_entry']}")
+                else:
+                    result['inferred_entry'] = None
+                    result['entry_confidence'] = 0.0
+                    self.log_info("仅匹配到单个FAIL_MESSAGE函数，跳过入口推断")
                 result['need_more_info'] = False
                 result['fallback_mode'] = False
-                self.log_info("已通过FAIL_MESSAGE匹配定位日志函数，跳过入口降级推断")
             # 使用日志中最上层的函数作为降级入口
             elif all_functions:
                 result['inferred_entry'] = all_functions[-1]  # 日志函数列表最后一个

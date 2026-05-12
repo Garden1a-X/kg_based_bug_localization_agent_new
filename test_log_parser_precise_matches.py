@@ -71,7 +71,8 @@ def test_precise_fail_message_matches_do_not_merge_text_extracted_functions():
     assert result["has_precise_log_matches"] is True
     assert "call" not in result["functions"]
     assert result["inferred_error_point"] == "first_error_func"
-    assert result["inferred_entry"] is None
+    assert result["inferred_entry"] == "second_error_func"
+    assert result["entry_confidence"] == 0.6
     assert result["need_more_info"] is False
     assert result["fallback_mode"] is False
 
@@ -83,5 +84,18 @@ def test_precise_fail_message_matches_do_not_backfill_start_from_log_functions()
 
     entities = EntityLocatorAgent(kg).execute(parsed)
 
-    assert entities["start_entity"] is None
+    assert entities["start_entity"]["name"] == "second_error_func"
     assert entities["end_entity"]["name"] == "first_error_func"
+
+
+def test_single_precise_fail_message_match_does_not_infer_entry():
+    kg = FakeKG()
+    parser = LogParserAgent(enable_llm=False, kg_interface=kg)
+
+    result = parser.parse_log("first failure")
+
+    assert result["functions"] == ["first_error_func"]
+    assert result["inferred_error_point"] == "first_error_func"
+    assert result["inferred_entry"] is None
+    assert result["need_more_info"] is False
+    assert result["fallback_mode"] is False
