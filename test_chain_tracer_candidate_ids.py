@@ -1,4 +1,5 @@
 from agents.chain_tracer_agent import CallChainTracerAgent
+from data.kg_interface import KnowledgeGraphInterface
 
 
 class RecordingKG:
@@ -67,3 +68,49 @@ def test_execute_top_k_uses_current_candidate_ids_for_disambiguation():
     assert kg.calls[0]["preferred_start_id"] == "start-1"
     assert kg.calls[0]["preferred_end_id"] == "end-right"
     assert paths[0]["nodes_detailed"][1]["entities"][0]["id"] == "end-right"
+
+
+def test_top_k_deduplicates_identical_paths_from_duplicate_edges():
+    kg = KnowledgeGraphInterface.__new__(KnowledgeGraphInterface)
+    kg.entity_by_id = {
+        "start": {"id": "start", "name": "entry", "type": "FUNCTION"},
+        "mid": {"id": "mid", "name": "mid", "type": "FUNCTION"},
+        "end": {"id": "end", "name": "target", "type": "FUNCTION"},
+    }
+    kg.func_name_to_ids = {
+        "entry": ["start"],
+        "mid": ["mid"],
+        "target": ["end"],
+    }
+    kg.entities = {"FUNCTION": {}}
+    kg.relations = {
+        "CALLS": [
+            {"head": "start", "tail": "mid", "type": "CALLS", "call_line": 10},
+            {"head": "start", "tail": "mid", "type": "CALLS", "call_line": 10},
+            {"head": "mid", "tail": "end", "type": "CALLS", "call_line": 20},
+            {"head": "mid", "tail": "end", "type": "CALLS", "call_line": 20},
+        ]
+    }
+    kg.decl_to_impl = {}
+    kg.impl_to_decl = {}
+    kg.async_functions = set()
+    kg.async_call_cache = {}
+    kg.llm_indirect_call_cache = {}
+    kg.call_graph_with_lines = {}
+    kg.calls_by_head = {}
+    kg.ioctl_calls_by_head = {}
+    kg._callees_with_lines_cache = {}
+    kg._build_call_graph_with_lines()
+
+    paths = kg.find_top_k_call_paths_with_indirect(
+        "entry",
+        "target",
+        max_depth=4,
+        k=5,
+        preferred_start_id="start",
+        preferred_end_id="end",
+    )
+
+    assert len(paths) == 1
+    assert paths[0]["path_ids"] == ["start", "mid", "end"]
+    assert paths[0]["call_lines"] == [10, 20]

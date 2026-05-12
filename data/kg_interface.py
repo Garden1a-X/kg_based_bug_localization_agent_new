@@ -57,6 +57,9 @@ class KnowledgeGraphInterface:
         # 调用关系图（包含行号信息）
         # {caller_id: [(callee_id, call_line), ...]}
         self.call_graph_with_lines = {}
+        self.calls_by_head = {}
+        self.ioctl_calls_by_head = {}
+        self._callees_with_lines_cache = {}
 
         # LLM间接调用检测缓存（函数指针）
         # {func_name: [(target_func, bridge_info), ...]}
@@ -241,16 +244,20 @@ class KnowledgeGraphInterface:
 
     def _build_call_graph_with_lines(self):
         """构建包含行号信息的调用图"""
-        if 'CALLS' not in self.relations:
-            return
+        self.call_graph_with_lines = {}
+        self.calls_by_head = {}
+        self.ioctl_calls_by_head = {}
+        self._callees_with_lines_cache = {}
 
-        for rel in self.relations['CALLS']:
+        for rel in self.relations.get('CALLS', []):
             caller_id = rel.get('head')
             callee_id = rel.get('tail')
             call_line = rel.get('call_line')
 
             if not caller_id or not callee_id:
                 continue
+
+            self.calls_by_head.setdefault(caller_id, []).append(rel)
 
             if caller_id not in self.call_graph_with_lines:
                 self.call_graph_with_lines[caller_id] = []
@@ -259,6 +266,11 @@ class KnowledgeGraphInterface:
                 'callee_id': callee_id,
                 'call_line': call_line
             })
+
+        for rel in self.relations.get('ioctl_call', []):
+            caller_id = rel.get('head')
+            if caller_id:
+                self.ioctl_calls_by_head.setdefault(caller_id, []).append(rel)
 
         logger.info(f"  ✓ 构建调用图（含行号）: {len(self.call_graph_with_lines)} 个调用者")
 
@@ -1307,12 +1319,34 @@ class KnowledgeGraphInterface:
             if preferred_end_id:
                 print(f"   指定终点ID: {preferred_end_id}")
 
+        # 去掉声明/实现标准化后产生的重复起点，避免同一BFS重复跑多次
+        start_impl_ids = list(dict.fromkeys(start_impl_ids))
+
         # 对每个起点实现分别执行BFS搜索
         from collections import deque
 
         all_found_paths = []
+        seen_path_keys = set()
         total_nodes_explored = 0
         total_max_queue_size = 0
+
+        def _edge_signature(edge):
+            if not isinstance(edge, dict):
+                return edge
+            bridge = edge.get('bridge') or {}
+            return (
+                edge.get('type'),
+                bridge.get('bridge_type'),
+                bridge.get('bridge_entity'),
+                bridge.get('method')
+            )
+
+        def _path_result_key(path_ids, edge_types, call_lines):
+            return (
+                tuple(path_ids),
+                tuple(_edge_signature(edge) for edge in edge_types),
+                tuple(call_lines)
+            )
 
         for start_idx, start_id in enumerate(start_impl_ids):
             if debug and len(start_impl_ids) > 1:
@@ -1342,6 +1376,11 @@ class KnowledgeGraphInterface:
 
                 # 检查是否到达终点
                 if current_id in end_equivalent_ids:
+                    path_key = _path_result_key(path_ids, edge_types, call_lines)
+                    if path_key in seen_path_keys:
+                        continue
+                    seen_path_keys.add(path_key)
+
                     # 将id路径转换为名字路径
                     path_names = []
                     for entity_id in path_ids:
@@ -1417,6 +1456,7 @@ class KnowledgeGraphInterface:
                             for e in self.find_all_functions(callee_name)
                             if e.get('id')
                         ]
+                    candidate_ids = list(dict.fromkeys(candidate_ids))
 
                     for callee_id in candidate_ids:
                         if not callee_id or callee_id in path_ids:  # 避免环路
@@ -1562,7 +1602,7 @@ class KnowledgeGraphInterface:
 
         return list(set(target_function_names))  # 去重
 
-    def _get_callees_with_lines(self, func_id: str, error_line: Optional[int] = None, allow_indirect: bool = True) -> List[Tuple[str, Optional[int], bool]]:
+    def _get_callees_with_lines(self, func_id: str, error_line: Optional[int] = None, allow_indirect: bool = True) -> List[Tuple[str, Optional[int], bool, Optional[str]]]:
         """
         获取函数的被调用者及其调用行号（支持间接调用）
 
@@ -1585,97 +1625,120 @@ class KnowledgeGraphInterface:
             - 对于间接调用（函数指针）：查询 ASSIGNED_TO 关系，is_from_indirect=True，callee_id=None
             - 如果 allow_indirect=False，跳过间接调用的查询
         """
+        func_id = self.normalize_id(str(func_id))
+        if not hasattr(self, '_callees_with_lines_cache'):
+            self._callees_with_lines_cache = {}
+        cache_key = (func_id, allow_indirect)
+        if cache_key in self._callees_with_lines_cache:
+            return list(self._callees_with_lines_cache[cache_key])
+
         result = []
+        seen = set()
+
+        def add_result(callee_name, call_line, is_from_indirect, callee_id):
+            key = (callee_name, call_line, is_from_indirect, callee_id)
+            if key in seen:
+                return
+            seen.add(key)
+            result.append((callee_name, call_line, is_from_indirect, callee_id))
 
         # 获取等价ID
         equivalent_ids = self.get_equivalent_ids(func_id)
 
-        # 遍历 CALLS 关系（而不是预构建的 call_graph_with_lines）
-        # 因为我们需要检查 call_type 和 target_type
-        if 'CALLS' not in self.relations:
-            return []
+        # 使用按 head 建好的索引，避免每展开一个搜索节点都全量扫描 CALLS。
+        if not hasattr(self, 'calls_by_head'):
+            self.calls_by_head = {}
+        calls_by_head = self.calls_by_head
+        if not calls_by_head and self.relations.get('CALLS'):
+            for rel in self.relations.get('CALLS', []):
+                head_id = rel.get('head')
+                if head_id:
+                    calls_by_head.setdefault(head_id, []).append(rel)
 
-        for rel in self.relations['CALLS']:
-            head_id = rel.get('head')
-            tail_id = rel.get('tail')
+        for head_id in equivalent_ids:
+            for rel in calls_by_head.get(head_id, []):
+                tail_id = rel.get('tail')
+                call_line = rel.get('call_line')
+                call_type = rel.get('call_type', 'direct')  # 默认是直接调用
+                target_type = rel.get('target_type', 'FUNCTION')  # 默认目标是函数
 
-            # 检查是否是当前函数的调用
-            if head_id not in equivalent_ids:
-                continue
+                # ========== 直接调用 ==========
+                if call_type == 'direct' or target_type == 'FUNCTION':
+                    tail_ids = tail_id if isinstance(tail_id, list) else [tail_id]
+                    for tail_item in tail_ids:
+                        # 标准化tail_id并查找名字
+                        callee_id_normalized = self.normalize_id(tail_item)
+                        callee_entity = self.entity_by_id.get(callee_id_normalized)
 
-            call_line = rel.get('call_line')
-            call_type = rel.get('call_type', 'direct')  # 默认是直接调用
-            target_type = rel.get('target_type', 'FUNCTION')  # 默认目标是函数
+                        if callee_entity and 'name' in callee_entity:
+                            add_result(callee_entity['name'], call_line, False, callee_id_normalized)
 
-            # ========== 直接调用 ==========
-            if call_type == 'direct' or target_type == 'FUNCTION':
-                # 标准化tail_id并查找名字
-                callee_id_normalized = self.normalize_id(tail_id)
-                callee_entity = self.entity_by_id.get(callee_id_normalized)
+                # ========== 间接调用（函数指针） ==========
+                elif call_type == 'indirect' and target_type == 'FIELD':
+                    # 如果不允许间接调用，跳过
+                    if not allow_indirect:
+                        # 提前获取 field_path 用于日志
+                        _field_path = rel.get('field_path', [])
+                        _field_name = _field_path[-1] if _field_path else 'unknown'
+                        logger.debug(f"跳过间接调用（allow_indirect=False）: {_field_name}")
+                        continue
 
-                if callee_entity and 'name' in callee_entity:
-                    result.append((callee_entity['name'], call_line, False, callee_id_normalized))
+                    # tail 指向 FIELD 实体
+                    field_entity = self.entity_by_id.get(tail_id)
 
-            # ========== 间接调用（函数指针） ==========
-            elif call_type == 'indirect' and target_type == 'FIELD':
-                # 如果不允许间接调用，跳过
-                if not allow_indirect:
-                    # 提前获取 field_path 用于日志
-                    _field_path = rel.get('field_path', [])
-                    _field_name = _field_path[-1] if _field_path else 'unknown'
-                    logger.debug(f"跳过间接调用（allow_indirect=False）: {_field_name}")
-                    continue
+                    if not field_entity:
+                        logger.warning(f"间接调用的 FIELD 实体不存在: {tail_id}")
+                        continue
 
-                # tail 指向 FIELD 实体
-                field_entity = self.entity_by_id.get(tail_id)
+                    # 获取字段名：优先使用 field_path 的最后一个元素
+                    field_path = rel.get('field_path', [])
+                    if field_path:
+                        field_name = field_path[-1]  # 使用路径的最后一个元素
+                    else:
+                        field_name = field_entity.get('name')  # fallback 到实体名称
 
-                if not field_entity:
-                    logger.warning(f"间接调用的 FIELD 实体不存在: {tail_id}")
-                    continue
+                    if not field_name:
+                        logger.warning(f"无法获取字段名: field_entity={field_entity}")
+                        continue
 
-                # 获取字段名：优先使用 field_path 的最后一个元素
-                field_path = rel.get('field_path', [])
-                if field_path:
-                    field_name = field_path[-1]  # 使用路径的最后一个元素
-                else:
-                    field_name = field_entity.get('name')  # fallback 到实体名称
+                    logger.debug(f"检测到间接调用: field_name={field_name}, field_path={field_path}")
 
-                if not field_name:
-                    logger.warning(f"无法获取字段名: field_entity={field_entity}")
-                    continue
+                    # 查询 ASSIGNED_TO 关系
+                    candidate_functions = self.query_assigned_to_by_field_name(field_name)
 
-                logger.debug(f"检测到间接调用: field_name={field_name}, field_path={field_path}")
-
-                # 查询 ASSIGNED_TO 关系
-                candidate_functions = self.query_assigned_to_by_field_name(field_name)
-
-                if candidate_functions:
-                    # 将所有候选函数加入结果（过度近似策略）
-                    for candidate_name in candidate_functions:
-                        result.append((candidate_name, call_line, True, None))  # 间接调用无精确 ID
-                else:
-                    # 如果图谱中没有找到，fallback 到 Mock 数据
-                    logger.debug(f"图谱中未找到字段 '{field_name}' 的 ASSIGNED_TO，尝试 Mock 数据")
-                    # TODO: 这里可以添加 Mock fallback 逻辑
+                    if candidate_functions:
+                        # 将所有候选函数加入结果（过度近似策略）
+                        for candidate_name in candidate_functions:
+                            add_result(candidate_name, call_line, True, None)  # 间接调用无精确 ID
+                    else:
+                        # 如果图谱中没有找到，fallback 到 Mock 数据
+                        logger.debug(f"图谱中未找到字段 '{field_name}' 的 ASSIGNED_TO，尝试 Mock 数据")
+                        # TODO: 这里可以添加 Mock fallback 逻辑
 
         # 遍历 ioctl_call 关系（直接调用，格式简单，只有 head/tail）
         # tail 可能是单个 ID 或 ID 列表
-        for rel in self.relations.get('ioctl_call', []):
-            head_id = rel.get('head')
-            tail_raw = rel.get('tail')
+        if not hasattr(self, 'ioctl_calls_by_head'):
+            self.ioctl_calls_by_head = {}
+        ioctl_calls_by_head = self.ioctl_calls_by_head
+        if not ioctl_calls_by_head and self.relations.get('ioctl_call'):
+            for rel in self.relations.get('ioctl_call', []):
+                head_id = rel.get('head')
+                if head_id:
+                    ioctl_calls_by_head.setdefault(head_id, []).append(rel)
 
-            if head_id not in equivalent_ids:
-                continue
+        for head_id in equivalent_ids:
+            for rel in ioctl_calls_by_head.get(head_id, []):
+                tail_raw = rel.get('tail')
+                tail_ids = tail_raw if isinstance(tail_raw, list) else [tail_raw]
 
-            tail_ids = tail_raw if isinstance(tail_raw, list) else [tail_raw]
+                for tail_id in tail_ids:
+                    callee_id_normalized = self.normalize_id(tail_id)
+                    callee_entity = self.entity_by_id.get(callee_id_normalized)
 
-            for tail_id in tail_ids:
-                callee_id_normalized = self.normalize_id(tail_id)
-                callee_entity = self.entity_by_id.get(callee_id_normalized)
+                    if callee_entity and 'name' in callee_entity:
+                        add_result(callee_entity['name'], None, False, callee_id_normalized)  # ioctl_call 没有 call_line
 
-                if callee_entity and 'name' in callee_entity:
-                    result.append((callee_entity['name'], None, False, callee_id_normalized))  # ioctl_call 没有 call_line
-
+        self._callees_with_lines_cache[cache_key] = list(result)
         return result
 
     def find_reachable_from_start(self, start: str, max_depth: int = 10) -> Dict[str, List[str]]:
