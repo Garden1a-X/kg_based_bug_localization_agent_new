@@ -742,8 +742,16 @@ class MasterCoordinator:
         # 回退策略：处理同名函数多实例导致的定位歧义
         # 场景：起点/终点函数名在图中有多个实体，默认定位到的实例无法连通
         if not paths:
-            start_name = start_func
-            end_name = end_func
+            start_name = (
+                entities['start_entity'].get('name')
+                if entities.get('start_entity')
+                else parsed_log.get('inferred_entry')
+            )
+            end_name = (
+                entities['end_entity'].get('name')
+                if entities.get('end_entity')
+                else parsed_log.get('inferred_error_point')
+            )
             start_candidates = self.kg.find_all_functions(start_name) if start_name else []
             end_candidates = self.kg.find_all_functions(end_name) if end_name else []
 

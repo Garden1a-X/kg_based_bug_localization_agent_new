@@ -600,6 +600,8 @@ class CallChainTracerAgent(BaseAgent):
         """
         start_name = start_entity['name']
         end_name = end_entity['name']
+        start_id = start_entity.get('id')
+        end_id = end_entity.get('id')
 
         self.log_start(f"追踪Top-{k}条调用链: {start_name} -> {end_name}")
         if error_line:
