@@ -1,0 +1,5 @@
+# 最小配置示例
+# 只提供最基本的平台和驱动信息
+
+platform: RK3288
+driver_hint: dw_mci

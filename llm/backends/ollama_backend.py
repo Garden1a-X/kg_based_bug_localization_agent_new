@@ -133,6 +133,15 @@ class OllamaBackend(BaseLLMBackend):
             # Ollama的响应格式: {"message": {"role": "assistant", "content": "..."}, "done": true}
             if "message" in result and "content" in result["message"]:
                 content = result["message"]["content"]
+
+                # 检查内容是否为空
+                if content is None:
+                    logger.warning(f"⚠️  Ollama返回空内容 (content=None)")
+                    logger.warning(f"   model: {self.model}")
+                    logger.warning(f"   done: {result.get('done', 'N/A')}")
+                    logger.warning(f"   完整响应: {result}")
+                    return None
+
                 logger.debug(f"Ollama响应成功: length={len(content)}")
                 return content
             else:

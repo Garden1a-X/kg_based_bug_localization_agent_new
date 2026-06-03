@@ -1,425 +1,191 @@
 #!/usr/bin/env python3
 """
-测试日志匹配逻辑
-演示如何从日志逐行匹配到FAIL_MESSAGE实体，推断关键函数
+测试日志匹配功能
+用于调试日志解析和FAIL_MESSAGE匹配过程
 """
 import sys
+import argparse
 from pathlib import Path
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from data.mock_indirect_calls import (
-    MOCK_FAIL_MESSAGES,
-    _extract_message_pattern
-)
-from openai import OpenAI
-from loguru import logger
-import re
-import json
-import os
+from data.kg_interface import KnowledgeGraphInterface
+from agents.log_parser_agent import LogParserAgent
+from llm import LLMClient
+from utils.logger import logger
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+
+console = Console()
 
 
-def match_log_line_to_fail_message(log_line: str, fail_messages: dict) -> list:
-    """
-    尝试将一行日志匹配到FAIL_MESSAGE实体
+def print_fail_messages(fail_messages):
+    """打印所有FAIL_MESSAGE实体"""
+    console.print("\n[bold cyan]═══ FAIL_MESSAGE 实体列表 ═══[/bold cyan]")
 
-    Args:
-        log_line: 单行日志文本
-        fail_messages: FAIL_MESSAGE实体字典
-
-    Returns:
-        匹配到的消息列表 [(msg_id, msg_data, matched_text, similarity), ...]
-    """
-    matches = []
-
-    for msg_id, msg_data in fail_messages.items():
-        # 从name字段提取匹配模式
-        pattern = _extract_message_pattern(msg_data.get('name', ''))
-        if not pattern:
-            continue
-
-        # 尝试匹配
-        match_obj = re.search(pattern, log_line, re.IGNORECASE)
-        if match_obj:
-            matched_text = match_obj.group(0)
-
-            # 计算相似度（匹配长度占日志行的比例）
-            similarity = len(matched_text) / len(log_line.strip()) if log_line.strip() else 0
-
-            matches.append((msg_id, msg_data, matched_text, similarity))
-
-    # 按相似度排序（从高到低）
-    matches.sort(key=lambda x: x[3], reverse=True)
-
-    return matches
-
-
-def analyze_log_by_lines(log_text: str) -> dict:
-    """
-    逐行分析日志，匹配FAIL_MESSAGE
-
-    Args:
-        log_text: 完整日志文本
-
-    Returns:
-        分析结果
-    """
-    lines = [line.strip() for line in log_text.strip().split('\n') if line.strip()]
-
-    result = {
-        'total_lines': len(lines),
-        'line_matches': [],
-        'all_functions': []
-    }
-
-    print("=" * 70)
-    print("逐行分析日志")
-    print("=" * 70)
-
-    for idx, line in enumerate(lines, 1):
-        print(f"\n【第{idx}行】 {line}")
-
-        matches = match_log_line_to_fail_message(line, MOCK_FAIL_MESSAGES)
-
-        if matches:
-            # 取最佳匹配（相似度最高）
-            best_msg_id, best_msg, matched_text, similarity = matches[0]
-            func_name = best_msg.get('scope')
-
-            print(f"  ✓ 匹配成功!")
-            print(f"    匹配文本: '{matched_text}'")
-            print(f"    相似度: {similarity:.2%}")
-            print(f"    推断函数: {func_name}")
-            print(f"    源文件: {best_msg.get('source_file')}:{best_msg.get('start_line')}")
-
-            # 显示FAIL_MESSAGE的原始name
-            print(f"    原始代码: {best_msg.get('name')}")
-
-            # 记录所有候选函数（用于LLM分析）
-            candidates = []
-            for msg_id, msg, txt, sim in matches:
-                candidates.append({
-                    'function': msg.get('scope'),
-                    'message_id': msg_id,
-                    'source_file': msg.get('source_file'),
-                    'start_line': msg.get('start_line'),
-                    'similarity': sim,
-                    'matched_text': txt
-                })
-
-            result['line_matches'].append({
-                'line_number': idx,
-                'log_line': line,
-                'matched_text': matched_text,
-                'similarity': similarity,
-                'function': func_name,
-                'message_id': best_msg_id,
-                'source_file': best_msg.get('source_file'),
-                'start_line': best_msg.get('start_line'),
-                'candidates': candidates  # 所有候选函数
-            })
-
-            if func_name and func_name not in result['all_functions']:
-                result['all_functions'].append(func_name)
-
-            # 如果有多个匹配，显示其他候选
-            if len(matches) > 1:
-                print(f"    其他候选:")
-                for msg_id, msg, txt, sim in matches[1:]:
-                    print(f"      - {msg.get('scope')} (相似度: {sim:.2%})")
-        else:
-            print(f"  ✗ 未匹配到FAIL_MESSAGE")
-
-    return result
-
-
-def display_summary(result: dict):
-    """显示分析汇总"""
-    print("\n" + "=" * 70)
-    print("分析汇总")
-    print("=" * 70)
-
-    print(f"\n总日志行数: {result['total_lines']}")
-    print(f"成功匹配: {len(result['line_matches'])} 行")
-    print(f"推断出的函数: {len(result['all_functions'])} 个")
-
-    if result['all_functions']:
-        print("\n关键函数列表（按日志出现顺序）:")
-        for idx, func in enumerate(result['all_functions'], 1):
-            print(f"  {idx}. {func}")
-
-        print("\n💡 调用链顺序（逆序，因为日志是栈式）:")
-        print(f"  入口 → {' → '.join(reversed(result['all_functions']))} → 错误点")
-
-
-def analyze_log_with_llm(log_text: str, result: dict) -> dict:
-    """
-    使用LLM分析日志，进行候选函数消歧和入口点推断
-
-    Args:
-        log_text: 完整日志文本
-        result: analyze_log_by_lines()的结果
-
-    Returns:
-        LLM分析结果 {start_entity, end_entity, intermediate_entities, reasoning}
-    """
-    # 初始化OpenAI客户端
-    try:
-        client = OpenAI(api_key="", base_url="http://10.12.208.86:8502")
-    except Exception as e:
-        logger.error(f"初始化OpenAI客户端失败: {e}")
-        return {
-            "error": f"初始化OpenAI客户端失败: {e}",
-            "start_entity": None,
-            "end_entity": None,
-            "intermediate_entities": []
-        }
-
-    # 构建提示词
-    prompt = f"""你是一个Linux内核驱动错误分析专家。请分析以下错误日志，完成两个任务：
-
-## 错误日志
-```
-{log_text.strip()}
-```
-
-## 日志匹配结果
-每行日志已匹配到代码中的FAIL_MESSAGE实体（错误打印语句）：
-
-"""
-
-    # 添加每行的匹配信息
-    for match in result['line_matches']:
-        if not match.get('candidates'):
-            continue
-
-        prompt += f"**第{match['line_number']}行**: `{match['log_line']}`\n"
-
-        if len(match['candidates']) > 1:
-            prompt += f"  有 {len(match['candidates'])} 个候选函数（需要消歧）:\n"
-            for cand in match['candidates']:
-                prompt += f"    - {cand['function']} ({cand['source_file']}:{cand['start_line']}) 相似度={cand['similarity']:.2%}\n"
-        else:
-            cand = match['candidates'][0]
-            prompt += f"  匹配函数: {cand['function']} ({cand['source_file']}:{cand['start_line']})\n"
-
-        prompt += "\n"
-
-    # 添加任务说明
-    prompt += """
-## 任务
-
-1. **消歧**: 对于有多个候选的日志行，选择最可能的函数
-2. **推断入口点**: 推断这个驱动代码在用户态可能的入口函数（通常是probe/init类函数）
-3. **识别错误点**: 识别实际发生错误的函数（通常是最底层/最具体的函数）
-4. **识别中间点**: 识别调用链中的关键中间函数
-
-## 背景知识
-- 这是一个MMC/SD卡驱动错误
-- 日志通常是栈式的（最深的函数错误先打印）
-- 驱动通常从probe函数开始初始化
-- 错误链可能是: 入口(probe) → 初始化 → 执行操作 → 错误点
-
-## 输出格式
-请以JSON格式返回，包含：
-```json
-{
-  "start_entity": "入口函数名",
-  "end_entity": "错误点函数名",
-  "intermediate_entities": ["中间函数1", "中间函数2", ...],
-  "reasoning": "推理过程说明",
-  "disambiguation": {
-    "line_1": "选择的函数名（如果有多个候选）",
-    ...
-  }
-}
-```
-"""
-
-    print("\n" + "=" * 70)
-    print("LLM分析中...")
-    print("=" * 70)
-
-    try:
-        # 调用LLM
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "你是一个Linux内核驱动错误分析专家。"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=2000,
-            timeout=180
-        )
-
-        llm_response = response.choices[0].message.content
-
-        if not llm_response:
-            return {
-                "error": "LLM调用失败",
-                "start_entity": None,
-                "end_entity": None,
-                "intermediate_entities": []
-            }
-
-        print(f"\nLLM原始响应:\n{llm_response}\n")
-
-        # 解析JSON（处理markdown代码块）
-        json_text = llm_response
-        if "```json" in json_text:
-            json_text = json_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in json_text:
-            json_text = json_text.split("```")[1].split("```")[0].strip()
-
-        llm_result = json.loads(json_text)
-
-        return llm_result
-
-    except Exception as e:
-        logger.error(f"LLM分析失败: {e}")
-        return {
-            "error": str(e),
-            "start_entity": None,
-            "end_entity": None,
-            "intermediate_entities": []
-        }
-
-
-def display_llm_results(llm_result: dict):
-    """显示LLM分析结果"""
-    print("\n" + "=" * 70)
-    print("LLM分析结果")
-    print("=" * 70)
-
-    if llm_result.get('error'):
-        print(f"\n❌ 分析失败: {llm_result['error']}")
+    if not fail_messages:
+        console.print("[yellow]没有找到FAIL_MESSAGE实体[/yellow]")
         return
 
-    print(f"\n🎯 入口点: {llm_result.get('start_entity', 'N/A')}")
-    print(f"🔴 错误点: {llm_result.get('end_entity', 'N/A')}")
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("ID", style="dim")
+    table.add_column("函数", style="cyan")
+    table.add_column("消息模式", style="green")
+    table.add_column("源文件", style="blue")
 
-    intermediate = llm_result.get('intermediate_entities', [])
-    if intermediate:
-        print(f"\n📍 中间关键点 ({len(intermediate)} 个):")
-        for idx, func in enumerate(intermediate, 1):
-            print(f"  {idx}. {func}")
+    for msg_id, msg in list(fail_messages.items())[:20]:  # 只显示前20个
+        table.add_row(
+            str(msg.get('id', '')),
+            str(msg.get('scope', '')),
+            str(msg.get('name', ''))[:60] + "..." if len(str(msg.get('name', ''))) > 60 else str(msg.get('name', '')),
+            str(msg.get('source_file', ''))
+        )
 
-    if llm_result.get('disambiguation'):
-        print(f"\n🔍 消歧决策:")
-        for line, func in llm_result['disambiguation'].items():
-            print(f"  {line}: 选择 {func}")
-
-    if llm_result.get('reasoning'):
-        print(f"\n💭 推理过程:")
-        print(f"  {llm_result['reasoning']}")
-
-    # 显示完整调用链
-    if llm_result.get('start_entity') and llm_result.get('end_entity'):
-        chain = [llm_result['start_entity']]
-        chain.extend(intermediate)
-        chain.append(llm_result['end_entity'])
-        print(f"\n🔗 推断的完整调用链:")
-        print(f"  {' → '.join(chain)}")
+    console.print(table)
+    console.print(f"\n[dim]总共 {len(fail_messages)} 个 FAIL_MESSAGE 实体（显示前20个）[/dim]")
 
 
-def extract_functions_from_log(log_text: str, use_llm: bool = False) -> dict:
-    """
-    从日志中提取关键函数（起始点、错误点、中间点）
+def print_matching_details(log_lines, fail_messages, log_parser):
+    """打印每一行日志的匹配详情"""
+    console.print("\n[bold cyan]═══ 日志匹配详情 ═══[/bold cyan]")
 
-    Args:
-        log_text: 错误日志文本
-        use_llm: 是否使用LLM进行增强分析
+    for idx, line in enumerate(log_lines, 1):
+        line = line.strip()
+        if not line:
+            continue
 
-    Returns:
-        {
-            'start_entity': 起始函数名,
-            'end_entity': 错误点函数名,
-            'intermediate_entities': [中间函数列表],
-            'all_functions': [所有匹配的函数列表],
-            'pattern_matching': 模式匹配详细结果,
-            'llm_analysis': LLM分析结果（如果启用）
-        }
-    """
-    # 1. 逐行分析日志，进行模式匹配
-    pattern_result = analyze_log_by_lines(log_text)
+        console.print(f"\n[bold yellow]行 {idx}:[/bold yellow] [dim]{line[:100]}...[/dim]" if len(line) > 100 else f"\n[bold yellow]行 {idx}:[/bold yellow] {line}")
 
-    # 2. 如果启用LLM，进行增强分析
-    llm_result = None
-    if use_llm:
-        llm_result = analyze_log_with_llm(log_text, pattern_result)
+        # 调用匹配函数
+        matches = log_parser._match_log_line_to_fail_message(line, fail_messages)
 
-    # 3. 提取关键函数
-    all_functions = pattern_result.get('all_functions', [])
-
-    # Mock起始点（暂时固定为probe函数）
-    start_entity = 'dw_mci_pltfm_probe'
-
-    # 错误点：最底层的函数（日志的第一个匹配函数）
-    end_entity = None
-    if all_functions:
-        end_entity = all_functions[0]
-
-    # 中间点：如果有LLM分析结果，使用LLM的；否则使用模式匹配的
-    intermediate_entities = []
-    if llm_result and not llm_result.get('error'):
-        intermediate_entities = llm_result.get('intermediate_entities', [])
-        # 如果LLM推断的错误点更准确，使用它
-        if llm_result.get('end_entity'):
-            end_entity = llm_result['end_entity']
-    else:
-        # 使用模式匹配的中间函数（去除第一个作为错误点）
-        if len(all_functions) > 1:
-            intermediate_entities = all_functions[1:]
-
-    return {
-        'start_entity': start_entity,
-        'end_entity': end_entity,
-        'intermediate_entities': intermediate_entities,
-        'all_functions': all_functions,
-        'pattern_matching': pattern_result,
-        'llm_analysis': llm_result
-    }
+        if matches:
+            console.print(f"  [green]✓ 找到 {len(matches)} 个匹配[/green]")
+            for rank, (msg_id, msg, matched_text, similarity) in enumerate(matches[:3], 1):  # 只显示前3个
+                console.print(f"    [{rank}] 相似度: {similarity:.2f}")
+                console.print(f"        函数: {msg.get('scope', 'N/A')}")
+                console.print(f"        匹配文本: {matched_text[:80]}..." if len(matched_text) > 80 else f"        匹配文本: {matched_text}")
+                console.print(f"        消息模式: {msg.get('name', 'N/A')[:80]}...")
+        else:
+            console.print("  [red]✗ 无匹配[/red]")
 
 
 def main():
-    """主测试函数"""
-    # 测试日志
-    mmc_error_log = """
-ALL phases bad!
-mmc0: tuning execution failed: -1
-mmc0: error -1 whilst initialising MMC card
-    """
+    parser = argparse.ArgumentParser(description='测试日志匹配功能')
+    parser.add_argument('--data-dir', required=True, help='知识图谱数据目录')
+    parser.add_argument('--log-file', required=True, help='错误日志文件路径')
+    parser.add_argument('--enable-llm', action='store_true', help='启用LLM辅助分析')
+    parser.add_argument('--show-all-messages', action='store_true', help='显示所有FAIL_MESSAGE')
+    parser.add_argument('--show-matching-details', action='store_true', help='显示每行匹配详情')
 
-    print("\n测试日志:")
-    print("-" * 70)
-    print(mmc_error_log.strip())
-    print("-" * 70)
+    args = parser.parse_args()
 
-    # 逐行分析
-    result = analyze_log_by_lines(mmc_error_log)
+    # 读取日志文件
+    log_file_path = Path(args.log_file)
+    if not log_file_path.exists():
+        console.print(f"[red]错误: 日志文件不存在: {args.log_file}[/red]")
+        return
 
-    # 显示基于模式匹配的汇总
-    display_summary(result)
+    with open(log_file_path, 'r', encoding='utf-8') as f:
+        log_text = f.read()
 
-    # LLM分析
-    llm_result = analyze_log_with_llm(mmc_error_log, result)
+    console.print(Panel(f"[bold]日志文件:[/bold] {args.log_file}\n[bold]数据目录:[/bold] {args.data_dir}",
+                       title="测试配置", border_style="blue"))
 
-    # 显示LLM分析结果
-    display_llm_results(llm_result)
+    # 创建LLM客户端（如果需要）
+    llm_client = None
+    if args.enable_llm:
+        console.print("\n[cyan]创建LLM客户端...[/cyan]")
+        llm_client = LLMClient(
+            backend='openai',
+            model='gpt-4o-mini',
+            base_url='http://10.12.208.86:8502',
+            api_key=''
+        )
+        if llm_client.is_available():
+            console.print(f"[green]✓ LLM客户端初始化成功[/green]")
+        else:
+            console.print("[yellow]⚠ LLM客户端不可用，将禁用LLM功能[/yellow]")
+            llm_client = None
 
-    print("\n" + "=" * 70)
-    print("测试完成!")
-    print("=" * 70)
+    # 加载知识图谱
+    console.print("\n[cyan]加载知识图谱...[/cyan]")
+    kg = KnowledgeGraphInterface(
+        args.data_dir,
+        enable_llm_detection=False,
+        llm_client=llm_client
+    )
+    console.print(f"[green]✓ 知识图谱加载完成[/green]")
+    console.print(f"  - 实体总数: {len(kg.entity_by_id)}")
 
-    # 返回完整结果
-    return {
-        'pattern_matching': result,
-        'llm_analysis': llm_result
-    }
+    # 创建LogParser
+    console.print("\n[cyan]创建LogParser...[/cyan]")
+    log_parser = LogParserAgent(
+        enable_llm=args.enable_llm and llm_client is not None,
+        llm_client=llm_client,
+        kg_interface=kg
+    )
+    console.print(f"[green]✓ LogParser创建完成[/green]")
+
+    # 手动提取FAIL_MESSAGE（复制log_parser内部逻辑）
+    console.print("\n[cyan]提取FAIL_MESSAGE实体...[/cyan]")
+    fail_messages = {}
+    for entity_id, entity in kg.entity_by_id.items():
+        if entity.get('type') == 'FAIL_MESSAGE':
+            fail_messages[entity_id] = {
+                'id': entity.get('id'),
+                'name': entity.get('name'),
+                'type': entity.get('type'),
+                'scope': entity.get('scope'),
+                'source_file': entity.get('source_file'),
+                'start_line': entity.get('start_line')
+            }
+
+    console.print(f"[green]✓ 找到 {len(fail_messages)} 个 FAIL_MESSAGE 实体[/green]")
+
+    # 显示FAIL_MESSAGE实体
+    if args.show_all_messages or len(fail_messages) <= 20:
+        print_fail_messages(fail_messages)
+
+    # 显示匹配详情
+    if args.show_matching_details:
+        log_lines = log_text.split('\n')
+        print_matching_details(log_lines, fail_messages, log_parser)
+
+    # 执行完整的日志解析
+    console.print("\n[bold cyan]═══ 执行日志解析 ═══[/bold cyan]")
+    result = log_parser.parse(log_text)
+
+    # 显示解析结果
+    console.print("\n[bold green]解析结果:[/bold green]")
+    console.print(f"  推断入口: {result.get('inferred_entry', 'N/A')}")
+    console.print(f"  推断错误点: {result.get('inferred_error_point', 'N/A')}")
+    console.print(f"  关键函数: {result.get('key_functions', [])}")
+    console.print(f"  匹配行数: {len(result.get('line_matches', []))}")
+    console.print(f"  涉及函数数: {len(result.get('all_functions', []))}")
+
+    # 显示匹配的行
+    if result.get('line_matches'):
+        console.print("\n[bold cyan]匹配的日志行:[/bold cyan]")
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("行号", style="dim", width=6)
+        table.add_column("函数", style="cyan", width=30)
+        table.add_column("日志内容", style="green")
+
+        for match in result['line_matches'][:10]:  # 只显示前10行
+            table.add_row(
+                str(match.get('line_number', '')),
+                str(match.get('function', ''))[:28],
+                str(match.get('matched_text', ''))[:60] + "..." if len(str(match.get('matched_text', ''))) > 60 else str(match.get('matched_text', ''))
+            )
+
+        console.print(table)
+        if len(result['line_matches']) > 10:
+            console.print(f"[dim]（显示前10行，共 {len(result['line_matches'])} 行）[/dim]")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

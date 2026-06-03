@@ -11,18 +11,13 @@ from pathlib import Path
 # ============================================================
 # TODO: 等图谱修复后删除这个导入
 # ============================================================
-from data.mock_indirect_calls import (
-    get_mock_async_bridge,
-    get_mock_function_pointer_bridge,
-    get_mock_indirect_callees,
-    get_mock_async_assigned_to
-)
+# Mock 数据已移除 - 现在完全依赖图谱数据
 
 
 class KnowledgeGraphInterface:
     """知识图谱接口 - 基于JSON文件"""
 
-    def __init__(self, data_dir: str = None, enable_llm_detection: bool = False, llm_client=None):
+    def __init__(self, data_dir: str = None, enable_llm_detection: bool = False, llm_client=None, path_mappings: dict = None):
         """
         初始化知识图谱接口
 
@@ -30,6 +25,8 @@ class KnowledgeGraphInterface:
             data_dir: 数据文件所在目录
             enable_llm_detection: 是否启用LLM辅助间接调用检测（运行时）
             llm_client: LLM客户端实例（可选）
+            path_mappings: 路径映射字典，用于将图谱中的路径映射到当前环境
+                          例如: {"E:\\cpppro\\clang_kg\\linux": "/data/xuao/code_kg/data/linux_data"}
         """
         if data_dir is None:
             data_dir = os.getenv('KG_DATA_DIR', '/data/xuao/code_kg_search/linux_test/data')
@@ -37,6 +34,13 @@ class KnowledgeGraphInterface:
         self.data_dir = Path(data_dir)
         self.enable_llm_detection = enable_llm_detection
         self.llm_client = llm_client  # 统一的LLM客户端
+
+        # 路径映射配置
+        self.path_mappings = path_mappings or {}
+        if self.path_mappings:
+            logger.info(f"  ✓ 配置路径映射: {len(self.path_mappings)} 个")
+            for old_path, new_path in self.path_mappings.items():
+                logger.info(f"    {old_path} -> {new_path}")
 
         # 缓存数据
         self.entities = {}  # {entity_type: {name: entity}}
@@ -53,6 +57,12 @@ class KnowledgeGraphInterface:
         # 调用关系图（包含行号信息）
         # {caller_id: [(callee_id, call_line), ...]}
         self.call_graph_with_lines = {}
+        self.calls_by_head = {}
+        self.calls_by_tail = {}
+        self.ioctl_calls_by_head = {}
+        self.ioctl_calls_by_tail = {}
+        self._callees_with_lines_cache = {}
+        self._callers_with_lines_cache = {}
 
         # LLM间接调用检测缓存（函数指针）
         # {func_name: [(target_func, bridge_info), ...]}
@@ -141,23 +151,29 @@ class KnowledgeGraphInterface:
             # 字典格式：按类型分组
             for rel_type, rel_list in relations_data.items():
                 if isinstance(rel_list, list):
-                    # 标准化关系中的ID为字符串
+                    # 标准化关系中的ID为字符串（tail 可能是列表）
                     for rel in rel_list:
                         if 'head' in rel:
                             rel['head'] = str(rel['head'])
                         if 'tail' in rel:
-                            rel['tail'] = str(rel['tail'])
+                            if isinstance(rel['tail'], list):
+                                rel['tail'] = [str(x) for x in rel['tail']]
+                            else:
+                                rel['tail'] = str(rel['tail'])
                     self.relations[rel_type] = rel_list
                     logger.info(f"  ✓ 加载 {rel_type}: {len(rel_list)} 个")
         elif isinstance(relations_data, list):
             # 列表格式：根据 type 字段分组
             for relation in relations_data:
                 if isinstance(relation, dict):
-                    # 标准化关系中的ID为字符串
+                    # 标准化关系中的ID为字符串（tail 可能是列表）
                     if 'head' in relation:
                         relation['head'] = str(relation['head'])
                     if 'tail' in relation:
-                        relation['tail'] = str(relation['tail'])
+                        if isinstance(relation['tail'], list):
+                            relation['tail'] = [str(x) for x in relation['tail']]
+                        else:
+                            relation['tail'] = str(relation['tail'])
                     rel_type = relation.get('type', relation.get('relation_type', 'UNKNOWN'))
                     if rel_type not in self.relations:
                         self.relations[rel_type] = []
@@ -231,16 +247,26 @@ class KnowledgeGraphInterface:
 
     def _build_call_graph_with_lines(self):
         """构建包含行号信息的调用图"""
-        if 'CALLS' not in self.relations:
-            return
+        self.call_graph_with_lines = {}
+        self.calls_by_head = {}
+        self.calls_by_tail = {}
+        self.ioctl_calls_by_head = {}
+        self.ioctl_calls_by_tail = {}
+        self._callees_with_lines_cache = {}
+        self._callers_with_lines_cache = {}
 
-        for rel in self.relations['CALLS']:
+        for rel in self.relations.get('CALLS', []):
             caller_id = rel.get('head')
             callee_id = rel.get('tail')
             call_line = rel.get('call_line')
 
             if not caller_id or not callee_id:
                 continue
+
+            self.calls_by_head.setdefault(caller_id, []).append(rel)
+            callee_ids = callee_id if isinstance(callee_id, list) else [callee_id]
+            for tail_id in callee_ids:
+                self.calls_by_tail.setdefault(tail_id, []).append(rel)
 
             if caller_id not in self.call_graph_with_lines:
                 self.call_graph_with_lines[caller_id] = []
@@ -249,6 +275,16 @@ class KnowledgeGraphInterface:
                 'callee_id': callee_id,
                 'call_line': call_line
             })
+
+        for rel in self.relations.get('ioctl_call', []):
+            caller_id = rel.get('head')
+            if caller_id:
+                self.ioctl_calls_by_head.setdefault(caller_id, []).append(rel)
+            tail_raw = rel.get('tail')
+            tail_ids = tail_raw if isinstance(tail_raw, list) else [tail_raw]
+            for tail_id in tail_ids:
+                if tail_id:
+                    self.ioctl_calls_by_tail.setdefault(tail_id, []).append(rel)
 
         logger.info(f"  ✓ 构建调用图（含行号）: {len(self.call_graph_with_lines)} 个调用者")
 
@@ -380,6 +416,7 @@ class KnowledgeGraphInterface:
             'HAS_PARAMETERS': 'relation_has_parameters.json',
             'HAS_VARIABLES': 'relation_has_variables.json',
             'INCLUDES': 'relation_includes.json',
+            'ioctl_call': 'relation_ioctl_call.json',
         }
 
         for rel_type, filename in relation_files.items():
@@ -389,12 +426,15 @@ class KnowledgeGraphInterface:
                     data = json.load(f)
                     if isinstance(data, dict):
                         data = list(data.values())
-                    # 标准化关系中的ID为字符串
+                    # 标准化关系中的ID为字符串（tail 可能是列表）
                     for rel in data:
                         if 'head' in rel:
                             rel['head'] = str(rel['head'])
                         if 'tail' in rel:
-                            rel['tail'] = str(rel['tail'])
+                            if isinstance(rel['tail'], list):
+                                rel['tail'] = [str(x) for x in rel['tail']]
+                            else:
+                                rel['tail'] = str(rel['tail'])
                     self.relations[rel_type] = data
                 logger.info(f"✓ 加载 {rel_type}: {len(self.relations[rel_type])} 个")
 
@@ -464,7 +504,19 @@ class KnowledgeGraphInterface:
             entity['file'] = entity['source_file']
 
         return entity
-    
+
+    def find_all_functions(self, func_name: str) -> List[Dict]:
+        """
+        查找所有同名函数实体（处理同名函数在不同文件的情况）
+
+        Returns:
+            所有同名函数实体列表
+        """
+        return [
+            e for e in self.entity_by_id.values()
+            if e.get('name') == func_name and e.get('type') == 'FUNCTION'
+        ]
+
     def find_functions_by_pattern(self, pattern: str) -> List[Dict]:
         """
         模糊查找函数
@@ -634,12 +686,7 @@ class KnowledgeGraphInterface:
         #         logger.debug(f"函数 {func_name} 使用LLM检测结果: {len(llm_callees)} 个间接调用")
         #         return llm_callees
 
-        # fallback到Mock数据（仅用于测试/兼容）
-        mock_callees = get_mock_indirect_callees(func_name)
-        if mock_callees:
-            logger.debug(f"函数 {func_name} 使用Mock数据: {len(mock_callees)} 个间接调用")
-            return mock_callees
-
+        # 没有找到间接调用
         return []
 
     def _detect_async_call(self, caller_name: str, callee_name: str) -> List[tuple]:
@@ -659,76 +706,100 @@ class KnowledgeGraphInterface:
         Returns:
             [(async_target, bridge_info), ...]
         """
+        logger.info(f"🔍 检测到异步调用: {caller_name} -> {callee_name}")
+
         # 1. 检查缓存
         cache_key = (caller_name, callee_name)
         if cache_key in self.async_call_cache:
-            logger.debug(f"使用缓存的异步调用: {caller_name} -> {callee_name}")
-            return self.async_call_cache[cache_key]
+            cached_targets = self.async_call_cache[cache_key]
+            logger.info(f"  ✓ 使用缓存结果: 找到 {len(cached_targets)} 个异步目标")
+            for target_name, _ in cached_targets:
+                logger.info(f"    → {target_name}")
+            return cached_targets
 
         # 2. 获取 caller 的源码
+        logger.info(f"  📖 读取 {caller_name} 的源码...")
         caller_source = self._get_function_source(caller_name)
         if not caller_source:
-            logger.debug(f"无法获取 {caller_name} 的源码，跳过异步调用检测")
+            logger.warning(f"  ✗ 无法获取源码，跳过异步调用检测")
             self.async_call_cache[cache_key] = []
             return []
+
+        logger.info(f"  ✓ 源码读取成功 (长度: {len(caller_source)} 字符)")
 
         # 3. LLM提取参数字段名（如果启用LLM）
         field_name = None
         if self.enable_llm_detection:
+            logger.info(f"  🤖 使用 LLM 分析源码，提取参数字段名...")
             field_name = self._llm_extract_async_parameter(caller_name, callee_name, caller_source)
             if field_name:
-                logger.info(f"LLM提取到字段名: {field_name} (从 {caller_name} 调用 {callee_name})")
+                logger.info(f"  ✓ LLM 提取成功: 字段名 = '{field_name}'")
 
         # 4. 如果 LLM 未提取到字段名，尝试使用常见模式
         if not field_name:
+            logger.info(f"  🔎 使用正则表达式提取参数字段名...")
             # 尝试从源码中用简单正则提取
             import re
             # 匹配模式：schedule_*(&xxx->field) 或 schedule_*(&field)
             match = re.search(rf'{re.escape(callee_name)}\s*\(\s*&\w*->(\w+)', caller_source)
             if match:
                 field_name = match.group(1)
-                logger.debug(f"正则提取到字段名: {field_name}")
+                logger.info(f"  ✓ 正则提取成功: 字段名 = '{field_name}' (模式: &xxx->{field_name})")
             else:
                 # 尝试匹配 schedule_*(&field)
                 match = re.search(rf'{re.escape(callee_name)}\s*\(\s*&(\w+)', caller_source)
                 if match:
                     field_name = match.group(1)
-                    logger.debug(f"正则提取到字段名: {field_name}")
+                    logger.info(f"  ✓ 正则提取成功: 字段名 = '{field_name}' (模式: &{field_name})")
+                else:
+                    logger.warning(f"  ✗ 正则提取失败，未找到参数字段")
 
         # 5. 如果还是没有，尝试 Mock 数据
         async_targets = []
         if field_name:
-            logger.debug(f"使用字段名查询 ASSIGNED_TO: {field_name}")
+            logger.info(f"  🔗 查询 MOUNTED_TO/ASSIGNED_TO 关系: 字段名 = '{field_name}'")
             async_targets = self._query_assigned_to_for_async(field_name)
 
-        # 6. 如果仍然没有结果，尝试 Mock 数据的直接映射
-        if not async_targets:
-            try:
-                from data.mock_indirect_calls import get_mock_async_assigned_to
+            if async_targets:
+                logger.info(f"  ✓ 找到 {len(async_targets)} 个异步目标函数:")
+                for target_name, bridge_info in async_targets:
+                    logger.info(f"    → {target_name} (method={bridge_info.get('method', 'unknown')})")
+            else:
+                logger.warning(f"  ✗ 未找到异步目标函数")
+        else:
+            logger.warning(f"  ✗ 未提取到字段名，无法查询异步目标")
 
-                # 尝试一些常见的字段名
-                common_field_names = ['detect', 'work', 'dwork', 'delayed_work']
-                for test_field in common_field_names:
-                    mock_targets = get_mock_async_assigned_to(test_field)
-                    if mock_targets:
-                        logger.debug(f"使用 Mock 数据 (字段: {test_field}): {mock_targets}")
-                        for target_name in mock_targets:
-                            async_targets.append((
-                                target_name,
-                                {
-                                    'bridge_type': 'async',
-                                    'bridge_entity': test_field,
-                                    'init_func': 'INIT_DELAYED_WORK',
-                                    'method': 'mock_data'
-                                }
-                            ))
-                        break
-            except ImportError:
-                pass
-
-        # 7. 缓存
+        # 6. 缓存结果
         self.async_call_cache[cache_key] = async_targets
         return async_targets
+
+    def _remap_path(self, path: str) -> str:
+        """
+        应用路径映射，将图谱中的路径转换为当前环境的路径
+
+        Args:
+            path: 原始路径
+
+        Returns:
+            重映射后的路径
+        """
+        if not self.path_mappings:
+            return path
+
+        # 尝试每个映射规则
+        for old_prefix, new_prefix in self.path_mappings.items():
+            # 处理 Windows 路径分隔符
+            normalized_path = path.replace('\\', '/')
+            normalized_old = old_prefix.replace('\\', '/')
+
+            if normalized_path.startswith(normalized_old):
+                # 替换前缀
+                relative_part = normalized_path[len(normalized_old):]
+                remapped = new_prefix + relative_part
+                logger.debug(f"路径映射: {path} -> {remapped}")
+                return remapped
+
+        return path
 
     def _get_function_source(self, func_name: str) -> Optional[str]:
         """
@@ -774,12 +845,15 @@ class KnowledgeGraphInterface:
             end_line = func_entity.get('end_line')
 
             if source_file and start_line and end_line:
+                # 应用路径映射
+                remapped_file = self._remap_path(source_file)
+
                 try:
-                    with open(source_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(remapped_file, 'r', encoding='utf-8', errors='ignore') as f:
                         lines = f.readlines()
                         source_code = ''.join(lines[start_line-1:end_line])
                 except Exception as e:
-                    logger.debug(f"读取源文件失败: {e}")
+                    logger.debug(f"读取源文件失败 ({remapped_file}): {e}")
                     return None
 
         return source_code
@@ -826,6 +900,8 @@ class KnowledgeGraphInterface:
         Returns:
             [(target_func, bridge_info), ...]
         """
+        logger.info(f"    🔍 查找字段 '{field_name}' 的 FIELD 实体...")
+
         # 先尝试图谱查询
         # 1. 找到所有名为 field_name 的 FIELD 实体
         field_ids = []
@@ -852,34 +928,50 @@ class KnowledgeGraphInterface:
                     field_ids.append(entity_id)
 
         if not field_ids:
-            logger.debug(f"未找到名为 {field_name} 的 FIELD 实体")
+            logger.warning(f"    ✗ 未找到名为 '{field_name}' 的 FIELD 实体")
+            return []
         else:
-            logger.debug(f"找到 {len(field_ids)} 个名为 {field_name} 的 FIELD 实体: {field_ids}")
+            logger.info(f"    ✓ 找到 {len(field_ids)} 个名为 '{field_name}' 的 FIELD 实体")
+            for fid in field_ids[:3]:  # 最多显示3个
+                logger.info(f"      - Field ID: {fid}")
 
         # 2. 构建 field_id 集合用于快速查询
         field_id_set = set(field_ids)
 
-        # 3. 查询 ASSIGNED_TO 关系
+        # 3. 查询 ASSIGNED_TO 和 MOUNTED_TO 关系
+        logger.info(f"    🔗 查询 MOUNTED_TO/ASSIGNED_TO 关系...")
+        field_to_func_relations = []
         assigned_to_relations = self.relations.get('ASSIGNED_TO', [])
+        mounted_to_relations = self.relations.get('MOUNTED_TO', [])
+        field_to_func_relations.extend(assigned_to_relations)
+        field_to_func_relations.extend(mounted_to_relations)
+
+        logger.info(f"    📊 图谱中共有 {len(assigned_to_relations)} 条 ASSIGNED_TO 关系")
+        logger.info(f"    📊 图谱中共有 {len(mounted_to_relations)} 条 MOUNTED_TO 关系")
+
         target_function_ids = []
+        matched_relations = []
 
-        logger.debug(f"查询 ASSIGNED_TO 关系，图谱中共有 {len(assigned_to_relations)} 条 ASSIGNED_TO 关系")
-
-        for rel in assigned_to_relations:
+        for rel in field_to_func_relations:
             head_id = rel.get('head')
             tail_id = rel.get('tail')
 
-            # ASSIGNED_TO: head=FIELD_ID, tail=FUNCTION_ID
+            # ASSIGNED_TO/MOUNTED_TO: head=FIELD_ID, tail=FUNCTION_ID
             if head_id in field_id_set:
                 target_function_ids.append(tail_id)
-                logger.debug(f"  匹配到 ASSIGNED_TO: {head_id} -> {tail_id}")
+                rel_type = rel.get('type', 'ASSIGNED_TO')
+                matched_relations.append((rel_type, head_id, tail_id))
 
         if not target_function_ids:
-            logger.debug(f"未在图谱中找到字段 {field_name} 的 ASSIGNED_TO 关系")
+            logger.warning(f"    ✗ 未找到字段 '{field_name}' 的 MOUNTED_TO/ASSIGNED_TO 关系")
+            return []
         else:
-            logger.debug(f"在图谱中找到 {len(target_function_ids)} 个赋值目标")
+            logger.info(f"    ✓ 找到 {len(target_function_ids)} 个匹配的关系:")
+            for rel_type, head_id, tail_id in matched_relations[:5]:  # 最多显示5个
+                logger.info(f"      - {rel_type}: {head_id} → {tail_id}")
 
         # 4. 获取目标函数名
+        logger.info(f"    📝 解析目标函数名...")
         targets = []
         for func_id in target_function_ids:
             func_entity = self.entity_by_id.get(func_id)
@@ -894,29 +986,11 @@ class KnowledgeGraphInterface:
                         'method': 'llm_analysis'
                     }
                 ))
+                logger.info(f"      - 函数 ID {func_id} → {target_func_name}")
 
         if targets:
             target_names = [t[0] for t in targets]
-            logger.debug(f"✓ 从图谱找到字段 '{field_name}' 的赋值目标: {target_names}")
-
-        # 5. 补充 Mock 数据（合并模式）
-        # 即使图谱有数据，也检查mock，以便补充图谱中缺失的关系
-        mock_targets = get_mock_async_assigned_to(field_name)
-        if mock_targets:
-            # 去重：避免重复添加
-            existing_names = {t[0] for t in targets}
-            for target_name in mock_targets:
-                if target_name not in existing_names:
-                    targets.append((
-                        target_name,
-                        {
-                            'bridge_type': 'async',
-                            'bridge_entity': field_name,
-                            'init_func': 'INIT_DELAYED_WORK',
-                            'method': 'llm_analysis'  # 字段名是LLM提取的，只是ASSIGNED_TO来自mock
-                        }
-                    ))
-                    logger.info(f"✓ 补充 Mock 数据：{field_name} -> {target_name}")
+            logger.info(f"    ✅ 成功找到 {len(targets)} 个异步目标函数: {target_names}")
 
         return targets
 
@@ -1170,7 +1244,9 @@ class KnowledgeGraphInterface:
         max_depth: int = 30,
         k: int = 5,
         error_line: Optional[int] = None,
-        debug: bool = False
+        debug: bool = False,
+        preferred_start_id: Optional[str] = None,
+        preferred_end_id: Optional[str] = None
     ) -> List[Dict]:
         """
         查找Top-K条调用路径（支持间接调用和call_line排序）
@@ -1182,6 +1258,8 @@ class KnowledgeGraphInterface:
             k: 返回路径数量上限
             error_line: 已废弃（保留用于兼容性，不再用于剪枝）
             debug: 是否输出调试信息
+            preferred_start_id: 指定起点实体ID（可选），用于消除同名函数歧义
+            preferred_end_id: 指定终点实体ID（可选），用于消除同名函数歧义
 
         Returns:
             路径列表，每个路径包含 path, edges, score, avg_call_line 等信息
@@ -1197,196 +1275,572 @@ class KnowledgeGraphInterface:
             if error_line:
                 print(f"注意: error_line参数已废弃 (传入值: {error_line})")
 
-        # 获取起点和终点的实体
-        start_entity = self.find_function(start)
-        end_entity = self.find_function(end)
-
-        if not start_entity or not end_entity:
+        # 获取终点候选实体（支持优先指定ID）
+        if preferred_end_id:
+            preferred_end_id = self.normalize_id(str(preferred_end_id))
+            preferred_end_entity = self.entity_by_id.get(preferred_end_id)
+            end_entities = [preferred_end_entity] if preferred_end_entity else []
+        else:
+            end_entities = self.find_all_functions(end)
+        if not end_entities:
             if debug:
-                print(f"❌ 起点或终点不存在!")
+                print(f"❌ 终点不存在!")
             return []
 
-        start_id = start_entity.get('id')
-        end_id = end_entity.get('id')
+        # 收集所有同名终点的等价 ID 集合
+        end_equivalent_ids = set()
+        for end_entity in end_entities:
+            end_id = end_entity.get('id')
+            if end_id:
+                end_id = self.normalize_id(end_id)
+                end_equivalent_ids.update(self.get_equivalent_ids(end_id))
 
-        if not start_id or not end_id:
+        # 获取起点候选ID（支持优先指定ID）
+        if preferred_start_id:
+            preferred_start_id = self.normalize_id(str(preferred_start_id))
+            all_start_ids = [preferred_start_id] if preferred_start_id in self.entity_by_id else []
+        else:
+            all_start_ids = self.func_name_to_ids.get(start, [])
+        if not all_start_ids:
             if debug:
-                print(f"❌ 起点或终点没有ID!")
+                print(f"❌ 起点不存在!")
             return []
+
+        # 过滤出所有实现（非声明）
+        start_impl_ids = []
+        for func_id in all_start_ids:
+            entity = self.entity_by_id.get(func_id)
+            if entity and not entity.get('is_declaration', False):
+                start_impl_ids.append(func_id)
+
+        # 如果没有实现，使用所有ID（包括声明）
+        if not start_impl_ids:
+            start_impl_ids = all_start_ids
 
         # 标准化为实现ID
-        start_id = self.normalize_id(start_id)
-        end_id = self.normalize_id(end_id)
-
-        # 获取终点的等价ID集合
-        end_equivalent_ids = self.get_equivalent_ids(end_id)
+        start_impl_ids = [self.normalize_id(sid) for sid in start_impl_ids]
 
         if debug:
             print(f"\n📌 ID信息:")
-            print(f"   起点ID: {start_id}")
-            print(f"   终点ID: {end_id}")
-            print(f"   终点等价ID: {end_equivalent_ids}")
+            print(f"   起点函数名: {start}")
+            print(f"   起点实现数量: {len(start_impl_ids)}")
+            print(f"   起点IDs: {start_impl_ids}")
+            if preferred_start_id:
+                print(f"   指定起点ID: {preferred_start_id}")
+            print(f"   终点函数名: {end}")
+            print(f"   终点实体数量: {len(end_entities)}")
+            print(f"   终点等价IDs: {end_equivalent_ids}")
+            if preferred_end_id:
+                print(f"   指定终点ID: {preferred_end_id}")
 
-        # BFS搜索（支持间接调用和多路径）
+        # 去掉声明/实现标准化后产生的重复起点，避免同一BFS重复跑多次
+        start_impl_ids = list(dict.fromkeys(start_impl_ids))
+
+        # 对每个起点实现分别执行BFS搜索
         from collections import deque
 
-        # 队列元素：(当前id, 路径ids, 边类型, call_lines, 是否是间接调用目标)
-        # is_indirect_target=True 表示该节点是通过间接调用到达的，后续只查找直接调用
-        queue = deque([(start_id, [start_id], [], [], False)])
-        # 改变visited的记录方式：记录 (node_id, path_length) 以支持找到多条路径
-        visited_at_depth = {}  # {node_id: min_depth}
+        all_found_paths = []
+        seen_path_keys = set()
+        total_nodes_explored = 0
+        total_max_queue_size = 0
 
-        found_paths = []
-        nodes_explored = 0
-        max_queue_size = 0
-
-        while queue and len(found_paths) < k:
-            nodes_explored += 1
-            max_queue_size = max(max_queue_size, len(queue))
-
-            current_id, path_ids, edge_types, call_lines, is_indirect_target = queue.popleft()
-            current_depth = len(path_ids)
-
-            if current_depth > max_depth:
-                continue
-
-            # 检查是否到达终点
-            if current_id in end_equivalent_ids:
-                # 将id路径转换为名字路径
-                path_names = []
-                for entity_id in path_ids:
-                    entity = self.entity_by_id.get(entity_id)
-                    if entity:
-                        path_names.append(entity['name'])
-
-                # 计算路径得分
-                # 1. 越短越好（每个节点扣1分）
-                # 2. 间接调用越少越好（每个间接调用扣10分）
-                # 3. 调用发生得越早越好（call_line越小越好）
-                indirect_count = sum(1 for e in edge_types if isinstance(e, dict))
-
-                # 计算平均调用行号（忽略None值）
-                valid_call_lines = [cl for cl in call_lines if cl is not None]
-                avg_call_line = sum(valid_call_lines) / len(valid_call_lines) if valid_call_lines else 0
-
-                # 得分计算：基础分1000 - 路径长度 - 间接调用惩罚 - 调用行号惩罚
-                # 调用行号惩罚：平均行号除以100（让行号的影响小于间接调用）
-                score = 1000 - current_depth - indirect_count * 10 - avg_call_line / 100
-
-                found_paths.append({
-                    'path': path_names,
-                    'edges': edge_types,
-                    'call_lines': call_lines,
-                    'score': score,
-                    'length': current_depth,
-                    'indirect_count': indirect_count,
-                    'avg_call_line': avg_call_line
-                })
-
-                if debug:
-                    print(f"✅ 找到路径 #{len(found_paths)}: 长度={current_depth}, 间接调用={indirect_count}")
-
-                continue
-
-            # 检查是否应该继续探索（允许多次访问但控制深度）
-            if current_id in visited_at_depth:
-                if current_depth >= visited_at_depth[current_id] + 3:  # 允许深度差3以内的重复访问
-                    continue
-            visited_at_depth[current_id] = min(
-                visited_at_depth.get(current_id, float('inf')),
-                current_depth
+        def _edge_signature(edge):
+            if not isinstance(edge, dict):
+                return edge
+            bridge = edge.get('bridge') or {}
+            return (
+                edge.get('type'),
+                bridge.get('bridge_type'),
+                bridge.get('bridge_entity'),
+                bridge.get('method')
             )
 
-            current_entity = self.entity_by_id.get(current_id)
-            if not current_entity:
-                continue
+        def _path_result_key(path_ids, edge_types, call_lines):
+            return (
+                tuple(path_ids),
+                tuple(_edge_signature(edge) for edge in edge_types),
+                tuple(call_lines)
+            )
 
-            current_name = current_entity['name']
+        for start_idx, start_id in enumerate(start_impl_ids):
+            if debug and len(start_impl_ids) > 1:
+                start_entity = self.entity_by_id.get(start_id)
+                start_info = f"{start_entity.get('name')}@{start_entity.get('source_file', 'unknown')}" if start_entity else str(start_id)
+                print(f"\n🔄 BFS #{start_idx + 1}/{len(start_impl_ids)}: 起点 = {start_info}")
 
-            # 1. 获取调用的邻居（带行号）
-            # 如果当前节点是间接调用的目标，只查找直接调用（allow_indirect=False）
-            # 这样可以避免间接调用的递归爆炸
-            allow_indirect_calls = not is_indirect_target
-            callees = self._get_callees_with_lines(current_id, error_line, allow_indirect=allow_indirect_calls)
+            # 队列元素：(当前id, 路径ids, 边类型, call_lines, 是否是间接调用目标)
+            # is_indirect_target=True 表示该节点是通过间接调用到达的，后续只查找直接调用
+            queue = deque([(start_id, [start_id], [], [], False)])
+            # 改变visited的记录方式：记录 (node_id, path_length) 以支持找到多条路径
+            visited_at_depth = {}  # {node_id: min_depth}
 
-            for callee_name, callee_line, is_from_indirect in callees:
-                callee_entity = self.find_function(callee_name)
-                if not callee_entity:
+            found_paths = []
+            nodes_explored = 0
+            max_queue_size = 0
+
+            while queue and len(found_paths) < k:
+                nodes_explored += 1
+                max_queue_size = max(max_queue_size, len(queue))
+
+                current_id, path_ids, edge_types, call_lines, is_indirect_target = queue.popleft()
+                current_depth = len(path_ids)
+
+                if current_depth > max_depth:
                     continue
 
-                callee_id = callee_entity.get('id')
-                if not callee_id:
+                # 检查是否到达终点
+                if current_id in end_equivalent_ids:
+                    path_key = _path_result_key(path_ids, edge_types, call_lines)
+                    if path_key in seen_path_keys:
+                        continue
+                    seen_path_keys.add(path_key)
+
+                    # 将id路径转换为名字路径
+                    path_names = []
+                    for entity_id in path_ids:
+                        entity = self.entity_by_id.get(entity_id)
+                        if entity:
+                            path_names.append(entity['name'])
+
+                    # 计算路径得分
+                    # 1. 越短越好（每个节点扣1分）
+                    # 2. 间接调用越少越好（每个间接调用扣10分）
+                    # 3. 调用发生得越早越好（call_line越小越好）
+                    indirect_count = sum(1 for e in edge_types if isinstance(e, dict))
+
+                    # 计算平均调用行号（忽略None值）
+                    valid_call_lines = [cl for cl in call_lines if cl is not None]
+                    avg_call_line = sum(valid_call_lines) / len(valid_call_lines) if valid_call_lines else 0
+
+                    # 得分计算：基础分1000 - 路径长度 - 间接调用惩罚 - 调用行号惩罚
+                    # 调用行号惩罚：平均行号除以100（让行号的影响小于间接调用）
+                    score = 1000 - current_depth - indirect_count * 10 - avg_call_line / 100
+
+                    found_paths.append({
+                        'path': path_names,
+                        'path_ids': path_ids,  # 添加 ID 列表，用于准确定位实体
+                        'edges': edge_types,
+                        'call_lines': call_lines,
+                        'score': score,
+                        'length': current_depth,
+                        'indirect_count': indirect_count,
+                        'avg_call_line': avg_call_line
+                    })
+
+                    if debug:
+                        print(f"✅ 找到路径 #{len(found_paths)}: 长度={current_depth}, 间接调用={indirect_count}")
+
                     continue
 
-                callee_id = self.normalize_id(callee_id)
-                if not callee_id or callee_id in path_ids:  # 避免环路
+                # 检查是否应该继续探索（允许多次访问但控制深度）
+                if current_id in visited_at_depth:
+                    if current_depth >= visited_at_depth[current_id] + 3:  # 允许深度差3以内的重复访问
+                        continue
+                visited_at_depth[current_id] = min(
+                    visited_at_depth.get(current_id, float('inf')),
+                    current_depth
+                )
+
+                current_entity = self.entity_by_id.get(current_id)
+                if not current_entity:
                     continue
 
-                # 确定边的类型
-                if is_from_indirect:
-                    edge_type = {'type': 'indirect', 'bridge': {'bridge_type': 'function_pointer'}}
-                else:
-                    edge_type = 'direct'
+                current_name = current_entity['name']
 
-                # 添加到队列
-                # 如果是通过间接调用找到的函数，标记 is_indirect_target=True
-                # 这样该函数后续只会查找直接调用，避免递归爆炸
-                queue.append((
-                    callee_id,
-                    path_ids + [callee_id],
-                    edge_types + [edge_type],
-                    call_lines + [callee_line],
-                    is_from_indirect  # 继承间接调用标记
-                ))
+                # 1. 获取调用的邻居（带行号）
+                # 如果当前节点是间接调用的目标，只查找直接调用（allow_indirect=False）
+                # 这样可以避免间接调用的递归爆炸
+                allow_indirect_calls = not is_indirect_target
+                callees = self._get_callees_with_lines(current_id, error_line, allow_indirect=allow_indirect_calls)
 
-                # 检查是否是异步调用函数（只在直接调用时检查）
-                if not is_from_indirect and callee_name in self.async_functions:
-                    # 检测异步调用关系
-                    async_targets = self._detect_async_call(current_name, callee_name)
+                for callee_name, callee_line, is_from_indirect, callee_id_exact in callees:
+                    # 确定边的类型
+                    if is_from_indirect:
+                        edge_type = {'type': 'indirect', 'bridge': {'bridge_type': 'function_pointer'}}
+                    else:
+                        edge_type = 'direct'
 
-                    for async_target_name, bridge_info in async_targets:
-                        async_target_entity = self.find_function(async_target_name)
-                        if not async_target_entity:
+                    # 直接调用：使用图谱中的精确 ID，避免同名函数导致搜索爆炸
+                    # 间接调用：无精确 ID，对所有同名实体入队（本来就是不确定的）
+                    if callee_id_exact:
+                        candidate_ids = [callee_id_exact]
+                    else:
+                        candidate_ids = [
+                            self.normalize_id(e['id'])
+                            for e in self.find_all_functions(callee_name)
+                            if e.get('id')
+                        ]
+                    candidate_ids = list(dict.fromkeys(candidate_ids))
+
+                    for callee_id in candidate_ids:
+                        if not callee_id or callee_id in path_ids:  # 避免环路
                             continue
 
-                        async_target_id = async_target_entity.get('id')
-                        if not async_target_id:
-                            continue
-
-                        async_target_id = self.normalize_id(async_target_id)
-                        # 注意：async_target 可能已经在 path 中（避免环路）
-                        # 但 callee 一定不在 path 中（因为上面检查过了）
-                        if not async_target_id or async_target_id in path_ids + [callee_id]:
-                            continue
-
-                        # 添加异步调用边：current → callee → async_target
-                        # 路径包含两个节点：callee 和 async_target
-                        # 包含两条边：direct 和 async
-                        # 异步调用的目标函数也标记为 is_indirect_target=True（避免继续递归）
                         queue.append((
-                            async_target_id,
-                            path_ids + [callee_id, async_target_id],
-                            edge_types + ['direct', {'type': 'async', 'bridge': bridge_info}],
-                            call_lines + [callee_line, None],  # 异步调用没有call_line
-                            True  # 异步调用的目标也是间接目标，后续只查找直接调用
+                            callee_id,
+                            path_ids + [callee_id],
+                            edge_types + [edge_type],
+                            call_lines + [callee_line],
+                            is_from_indirect
                         ))
 
-        # 按得分排序
-        found_paths.sort(key=lambda x: x['score'], reverse=True)
+                    # 检查是否是异步调用函数（只在直接调用时检查）
+                    if not is_from_indirect and callee_name in self.async_functions:
+                        if debug:
+                            print(f"  ⚡ 触发异步调用检测: {current_name} -> {callee_name}")
+
+                        # 检测异步调用关系
+                        async_targets = self._detect_async_call(current_name, callee_name)
+
+                        if debug and async_targets:
+                            print(f"  ✅ 找到 {len(async_targets)} 个异步目标，添加到搜索队列")
+
+                        for async_target_name, bridge_info in async_targets:
+                            async_target_entities = self.find_all_functions(async_target_name)
+                            if not async_target_entities:
+                                if debug:
+                                    print(f"    ⚠️  异步目标 {async_target_name} 未在图谱中找到，跳过")
+                                continue
+
+                            for async_target_entity in async_target_entities:
+                                async_target_id = async_target_entity.get('id')
+                                if not async_target_id:
+                                    continue
+
+                                async_target_id = self.normalize_id(async_target_id)
+                                if not async_target_id or async_target_id in path_ids + [callee_id_exact]:
+                                    if debug:
+                                        print(f"    ⚠️  异步目标 {async_target_name} 已在路径中或无效，跳过")
+                                    continue
+
+                                if debug:
+                                    print(f"    ➕ 添加异步路径: {current_name} -> {callee_name} --[async]--> {async_target_name}")
+                                    print(f"       桥接信息: {bridge_info.get('bridge_entity')} ({bridge_info.get('method')})")
+
+                                # 添加异步调用边：current → callee → async_target
+                                queue.append((
+                                    async_target_id,
+                                    path_ids + [callee_id_exact, async_target_id],
+                                    edge_types + ['direct', {'type': 'async', 'bridge': bridge_info}],
+                                    call_lines + [callee_line, None],  # 异步调用没有call_line
+                                    True  # 异步调用的目标也是间接目标，后续只查找直接调用
+                                ))
+
+            # 收集当前起点的所有路径
+            all_found_paths.extend(found_paths)
+            total_nodes_explored += nodes_explored
+            total_max_queue_size = max(total_max_queue_size, max_queue_size)
+
+            if debug and len(start_impl_ids) > 1:
+                if found_paths:
+                    print(f"   ✅ 从该起点找到 {len(found_paths)} 条路径")
+                else:
+                    print(f"   ❌ 从该起点未找到路径")
+
+        if not all_found_paths:
+            if debug:
+                print("🔁 正向搜索未找到路径，尝试双向搜索...")
+            bidirectional_paths = self._find_bidirectional_call_paths(
+                start_impl_ids=start_impl_ids,
+                end_equivalent_ids=end_equivalent_ids,
+                max_depth=max_depth,
+                k=k,
+                error_line=error_line,
+                seen_path_keys=seen_path_keys,
+                debug=debug
+            )
+            all_found_paths.extend(bidirectional_paths)
+
+        # 合并所有起点的路径，按得分排序
+        all_found_paths.sort(key=lambda x: x['score'], reverse=True)
 
         if debug:
             print(f"\n{'='*80}")
-            if found_paths:
-                print(f"✅ 找到 {len(found_paths)} 条路径")
+            if all_found_paths:
+                print(f"✅ 总共找到 {len(all_found_paths)} 条路径")
             else:
                 print(f"❌ 未找到路径")
             print(f"{'='*80}")
             print(f"📊 搜索统计:")
-            print(f"   总探索节点: {nodes_explored}")
-            print(f"   最大队列大小: {max_queue_size}")
+            print(f"   起点实现数量: {len(start_impl_ids)}")
+            print(f"   总探索节点: {total_nodes_explored}")
+            print(f"   最大队列大小: {total_max_queue_size}")
             print(f"{'='*80}\n")
 
+        return all_found_paths[:k]
+
+    def _build_path_result(
+        self,
+        path_ids: List[str],
+        edge_types: List,
+        call_lines: List[Optional[int]]
+    ) -> Optional[Dict]:
+        """将ID路径转换为统一的Top-K路径结果。"""
+        path_names = []
+        for entity_id in path_ids:
+            entity = self.entity_by_id.get(entity_id)
+            if not entity:
+                return None
+            path_names.append(entity['name'])
+
+        indirect_count = sum(1 for edge in edge_types if isinstance(edge, dict))
+        valid_call_lines = [line for line in call_lines if line is not None]
+        avg_call_line = sum(valid_call_lines) / len(valid_call_lines) if valid_call_lines else 0
+        current_depth = len(path_ids)
+        score = 1000 - current_depth - indirect_count * 10 - avg_call_line / 100
+
+        return {
+            'path': path_names,
+            'path_ids': path_ids,
+            'edges': edge_types,
+            'call_lines': call_lines,
+            'score': score,
+            'length': current_depth,
+            'indirect_count': indirect_count,
+            'avg_call_line': avg_call_line
+        }
+
+    def _path_result_key(self, path_ids: List[str], edge_types: List, call_lines: List[Optional[int]]) -> tuple:
+        """生成路径去重键。"""
+        def edge_signature(edge):
+            if not isinstance(edge, dict):
+                return edge
+            bridge = edge.get('bridge') or {}
+            return (
+                edge.get('type'),
+                bridge.get('bridge_type'),
+                bridge.get('bridge_entity'),
+                bridge.get('method')
+            )
+
+        return (
+            tuple(path_ids),
+            tuple(edge_signature(edge) for edge in edge_types),
+            tuple(call_lines)
+        )
+
+    def _find_bidirectional_call_paths(
+        self,
+        start_impl_ids: List[str],
+        end_equivalent_ids: set,
+        max_depth: int,
+        k: int,
+        error_line: Optional[int] = None,
+        seen_path_keys: Optional[set] = None,
+        debug: bool = False
+    ) -> List[Dict]:
+        """
+        双向BFS兜底搜索。
+
+        正向侧沿 callee 展开，反向侧沿 caller 展开；两边在同一函数ID相遇时拼接路径。
+        """
+        from collections import deque
+
+        seen_path_keys = seen_path_keys if seen_path_keys is not None else set()
+        found_paths = []
+        combined_max_depth = max_depth * 2 - 1
+        forward_queue = deque()
+        backward_queue = deque()
+        forward_seen = {}
+        backward_seen = {}
+        forward_expanded = 0
+        backward_expanded = 0
+
+        for start_id in start_impl_ids:
+            start_id = self.normalize_id(start_id)
+            if not start_id or start_id not in self.entity_by_id:
+                continue
+            state = {
+                'path_ids': [start_id],
+                'edges': [],
+                'call_lines': [],
+                'is_indirect_target': False
+            }
+            forward_queue.append(start_id)
+            forward_seen[start_id] = state
+
+        for end_id in end_equivalent_ids:
+            end_id = self.normalize_id(end_id)
+            if not end_id or end_id not in self.entity_by_id:
+                continue
+            state = {
+                'path_ids': [end_id],
+                'edges': [],
+                'call_lines': []
+            }
+            backward_queue.append(end_id)
+            backward_seen[end_id] = state
+
+        def try_combine(meet_id):
+            if meet_id not in forward_seen or meet_id not in backward_seen:
+                return
+            forward_state = forward_seen[meet_id]
+            backward_state = backward_seen[meet_id]
+            path_ids = forward_state['path_ids'] + backward_state['path_ids'][1:]
+            if len(path_ids) > combined_max_depth:
+                return
+            edge_types = forward_state['edges'] + backward_state['edges']
+            call_lines = forward_state['call_lines'] + backward_state['call_lines']
+            path_key = self._path_result_key(path_ids, edge_types, call_lines)
+            if path_key in seen_path_keys:
+                return
+            path_result = self._build_path_result(path_ids, edge_types, call_lines)
+            if not path_result:
+                return
+            seen_path_keys.add(path_key)
+            path_result['method'] = 'bidirectional_search'
+            found_paths.append(path_result)
+            if debug:
+                print(f"✅ 双向搜索相遇: {self.entity_by_id[meet_id].get('name')}，路径长度={len(path_ids)}")
+
+        for meet_id in list(forward_seen):
+            try_combine(meet_id)
+
+        while (forward_queue or backward_queue) and len(found_paths) < k:
+            expand_forward = bool(forward_queue) and (
+                not backward_queue or len(forward_queue) <= len(backward_queue)
+            )
+
+            if expand_forward:
+                current_id = forward_queue.popleft()
+                forward_expanded += 1
+                current_state = forward_seen[current_id]
+                if len(current_state['path_ids']) >= max_depth:
+                    continue
+
+                callees = self._get_callees_with_lines(
+                    current_id,
+                    error_line,
+                    allow_indirect=not current_state.get('is_indirect_target', False)
+                )
+                for callee_name, callee_line, is_from_indirect, callee_id_exact in callees:
+                    edge_type = {'type': 'indirect', 'bridge': {'bridge_type': 'function_pointer'}} if is_from_indirect else 'direct'
+                    if callee_id_exact:
+                        candidate_ids = [callee_id_exact]
+                    else:
+                        candidate_ids = [
+                            self.normalize_id(entity['id'])
+                            for entity in self.find_all_functions(callee_name)
+                            if entity.get('id')
+                        ]
+                    candidate_ids = list(dict.fromkeys(candidate_ids))
+
+                    for callee_id in candidate_ids:
+                        if not callee_id or callee_id in current_state['path_ids']:
+                            continue
+                        if callee_id in forward_seen:
+                            continue
+
+                        new_state = {
+                            'path_ids': current_state['path_ids'] + [callee_id],
+                            'edges': current_state['edges'] + [edge_type],
+                            'call_lines': current_state['call_lines'] + [callee_line],
+                            'is_indirect_target': is_from_indirect
+                        }
+                        if len(new_state['path_ids']) > max_depth:
+                            continue
+                        forward_seen[callee_id] = new_state
+                        forward_queue.append(callee_id)
+                        try_combine(callee_id)
+                        if len(found_paths) >= k:
+                            break
+                    if len(found_paths) >= k:
+                        break
+            else:
+                current_id = backward_queue.popleft()
+                backward_expanded += 1
+                current_state = backward_seen[current_id]
+                if len(current_state['path_ids']) >= max_depth:
+                    continue
+
+                for caller_name, call_line, is_from_indirect, caller_id_exact in self._get_callers_with_lines(current_id):
+                    if is_from_indirect:
+                        continue
+                    if caller_id_exact:
+                        candidate_ids = [caller_id_exact]
+                    else:
+                        candidate_ids = [
+                            self.normalize_id(entity['id'])
+                            for entity in self.find_all_functions(caller_name)
+                            if entity.get('id')
+                        ]
+                    candidate_ids = list(dict.fromkeys(candidate_ids))
+
+                    for caller_id in candidate_ids:
+                        if not caller_id or caller_id in current_state['path_ids']:
+                            continue
+                        if caller_id in backward_seen:
+                            continue
+
+                        new_state = {
+                            'path_ids': [caller_id] + current_state['path_ids'],
+                            'edges': ['direct'] + current_state['edges'],
+                            'call_lines': [call_line] + current_state['call_lines']
+                        }
+                        if len(new_state['path_ids']) > max_depth:
+                            continue
+                        backward_seen[caller_id] = new_state
+                        backward_queue.append(caller_id)
+                        try_combine(caller_id)
+                        if len(found_paths) >= k:
+                            break
+                    if len(found_paths) >= k:
+                        break
+
+        found_paths.sort(key=lambda x: x['score'], reverse=True)
+        if debug:
+            if not found_paths:
+                same_name_misses = self._find_same_name_bidirectional_misses(forward_seen, backward_seen)
+                if same_name_misses:
+                    print("⚠️ 双向搜索发现同名但不同ID的候选相遇点:")
+                    for miss in same_name_misses[:5]:
+                        print(
+                            f"   {miss['name']}: "
+                            f"正向ID={miss['forward_id']} @{miss['forward_file']} ; "
+                            f"反向ID={miss['backward_id']} @{miss['backward_file']}"
+                        )
+                    if len(same_name_misses) > 5:
+                        print(f"   ... 还有 {len(same_name_misses) - 5} 个同名不同ID候选")
+            print(
+                "📊 双向搜索统计: "
+                f"正向访问={len(forward_seen)} (展开={forward_expanded}), "
+                f"反向访问={len(backward_seen)} (展开={backward_expanded}), "
+                f"组合最大长度={combined_max_depth}, "
+                f"找到路径={len(found_paths)}"
+            )
         return found_paths[:k]
+
+    def _find_same_name_bidirectional_misses(self, forward_seen: Dict, backward_seen: Dict) -> List[Dict]:
+        """查找双向搜索中同名但不同ID的近似相遇点，用于诊断同名函数歧义。"""
+        forward_by_name = {}
+        for entity_id in forward_seen:
+            entity = self.entity_by_id.get(entity_id)
+            if entity and entity.get('name'):
+                forward_by_name.setdefault(entity['name'], []).append(entity_id)
+
+        backward_by_name = {}
+        for entity_id in backward_seen:
+            entity = self.entity_by_id.get(entity_id)
+            if entity and entity.get('name'):
+                backward_by_name.setdefault(entity['name'], []).append(entity_id)
+
+        misses = []
+        for name in sorted(set(forward_by_name) & set(backward_by_name)):
+            for forward_id in forward_by_name[name]:
+                for backward_id in backward_by_name[name]:
+                    if forward_id == backward_id:
+                        continue
+                    forward_entity = self.entity_by_id.get(forward_id, {})
+                    backward_entity = self.entity_by_id.get(backward_id, {})
+                    misses.append({
+                        'name': name,
+                        'forward_id': forward_id,
+                        'forward_file': forward_entity.get('source_file', 'unknown'),
+                        'backward_id': backward_id,
+                        'backward_file': backward_entity.get('source_file', 'unknown')
+                    })
+
+        return misses
 
     def query_assigned_to_by_field_name(self, field_name: str) -> List[str]:
         """
@@ -1419,17 +1873,19 @@ class KnowledgeGraphInterface:
 
         logger.debug(f"找到 {len(field_ids)} 个名为 {field_name} 的 FIELD 实体")
 
-        # 2. 查询 ASSIGNED_TO 关系
+        # 2. 查询 ASSIGNED_TO 和 MOUNTED_TO 关系
         field_id_set = set(field_ids)
         target_function_names = []
 
-        assigned_to_relations = self.relations.get('ASSIGNED_TO', [])
+        field_to_func_relations = []
+        field_to_func_relations.extend(self.relations.get('ASSIGNED_TO', []))
+        field_to_func_relations.extend(self.relations.get('MOUNTED_TO', []))
 
-        for rel in assigned_to_relations:
+        for rel in field_to_func_relations:
             head_id = rel.get('head')
             tail_id = rel.get('tail')
 
-            # ASSIGNED_TO: head=FIELD_ID, tail=FUNCTION_ID
+            # ASSIGNED_TO/MOUNTED_TO: head=FIELD_ID, tail=FUNCTION_ID
             if head_id in field_id_set:
                 # 获取目标函数名
                 target_entity = self.entity_by_id.get(tail_id)
@@ -1437,16 +1893,17 @@ class KnowledgeGraphInterface:
                     target_name = target_entity.get('name')
                     if target_name:
                         target_function_names.append(target_name)
-                        logger.debug(f"  匹配到 ASSIGNED_TO: {field_name} -> {target_name}")
+                        rel_type = rel.get('type', 'ASSIGNED_TO')
+                        logger.debug(f"  匹配到 {rel_type}: {field_name} -> {target_name}")
 
         if target_function_names:
-            logger.debug(f"✓ 字段 '{field_name}' 的 ASSIGNED_TO 目标: {target_function_names}")
+            logger.debug(f"✓ 字段 '{field_name}' 的 ASSIGNED_TO/MOUNTED_TO 目标: {target_function_names}")
         else:
-            logger.debug(f"未找到字段 '{field_name}' 的 ASSIGNED_TO 关系")
+            logger.debug(f"未找到字段 '{field_name}' 的 ASSIGNED_TO/MOUNTED_TO 关系")
 
         return list(set(target_function_names))  # 去重
 
-    def _get_callees_with_lines(self, func_id: str, error_line: Optional[int] = None, allow_indirect: bool = True) -> List[Tuple[str, Optional[int], bool]]:
+    def _get_callees_with_lines(self, func_id: str, error_line: Optional[int] = None, allow_indirect: bool = True) -> List[Tuple[str, Optional[int], bool, Optional[str]]]:
         """
         获取函数的被调用者及其调用行号（支持间接调用）
 
@@ -1458,89 +1915,206 @@ class KnowledgeGraphInterface:
                            设为 False 时，只返回直接调用，用于避免间接调用的递归查询
 
         Returns:
-            [(callee_name, call_line, is_from_indirect), ...] 的列表
+            [(callee_name, call_line, is_from_indirect, callee_id), ...] 的列表
             - callee_name: 被调用函数名
             - call_line: 调用行号（用于路径排序）
             - is_from_indirect: 是否是通过间接调用找到的（True 表示间接调用）
+            - callee_id: 精确的被调函数 ID（直接调用时有值，间接调用时为 None）
 
         注意：
-            - 对于直接调用：is_from_indirect=False
-            - 对于间接调用（函数指针）：查询 ASSIGNED_TO 关系，is_from_indirect=True
+            - 对于直接调用：is_from_indirect=False，callee_id 为图谱中的精确 ID
+            - 对于间接调用（函数指针）：查询 ASSIGNED_TO 关系，is_from_indirect=True，callee_id=None
             - 如果 allow_indirect=False，跳过间接调用的查询
         """
+        func_id = self.normalize_id(str(func_id))
+        if not hasattr(self, '_callees_with_lines_cache'):
+            self._callees_with_lines_cache = {}
+        cache_key = (func_id, allow_indirect)
+        if cache_key in self._callees_with_lines_cache:
+            return list(self._callees_with_lines_cache[cache_key])
+
         result = []
+        seen = set()
+
+        def add_result(callee_name, call_line, is_from_indirect, callee_id):
+            key = (callee_name, call_line, is_from_indirect, callee_id)
+            if key in seen:
+                return
+            seen.add(key)
+            result.append((callee_name, call_line, is_from_indirect, callee_id))
 
         # 获取等价ID
         equivalent_ids = self.get_equivalent_ids(func_id)
 
-        # 遍历 CALLS 关系（而不是预构建的 call_graph_with_lines）
-        # 因为我们需要检查 call_type 和 target_type
-        if 'CALLS' not in self.relations:
-            return []
+        # 使用按 head 建好的索引，避免每展开一个搜索节点都全量扫描 CALLS。
+        if not hasattr(self, 'calls_by_head'):
+            self.calls_by_head = {}
+        calls_by_head = self.calls_by_head
+        if not calls_by_head and self.relations.get('CALLS'):
+            for rel in self.relations.get('CALLS', []):
+                head_id = rel.get('head')
+                if head_id:
+                    calls_by_head.setdefault(head_id, []).append(rel)
 
-        for rel in self.relations['CALLS']:
-            head_id = rel.get('head')
-            tail_id = rel.get('tail')
+        for head_id in equivalent_ids:
+            for rel in calls_by_head.get(head_id, []):
+                tail_id = rel.get('tail')
+                call_line = rel.get('call_line')
+                call_type = rel.get('call_type', 'direct')  # 默认是直接调用
+                target_type = rel.get('target_type', 'FUNCTION')  # 默认目标是函数
 
-            # 检查是否是当前函数的调用
-            if head_id not in equivalent_ids:
-                continue
+                # ========== 直接调用 ==========
+                if call_type == 'direct' or target_type == 'FUNCTION':
+                    tail_ids = tail_id if isinstance(tail_id, list) else [tail_id]
+                    for tail_item in tail_ids:
+                        # 标准化tail_id并查找名字
+                        callee_id_normalized = self.normalize_id(tail_item)
+                        callee_entity = self.entity_by_id.get(callee_id_normalized)
 
-            call_line = rel.get('call_line')
-            call_type = rel.get('call_type', 'direct')  # 默认是直接调用
-            target_type = rel.get('target_type', 'FUNCTION')  # 默认目标是函数
+                        if callee_entity and 'name' in callee_entity:
+                            add_result(callee_entity['name'], call_line, False, callee_id_normalized)
 
-            # ========== 直接调用 ==========
-            if call_type == 'direct' or target_type == 'FUNCTION':
-                # 标准化tail_id并查找名字
-                callee_id_normalized = self.normalize_id(tail_id)
-                callee_entity = self.entity_by_id.get(callee_id_normalized)
+                # ========== 间接调用（函数指针） ==========
+                elif call_type == 'indirect' and target_type == 'FIELD':
+                    # 如果不允许间接调用，跳过
+                    if not allow_indirect:
+                        # 提前获取 field_path 用于日志
+                        _field_path = rel.get('field_path', [])
+                        _field_name = _field_path[-1] if _field_path else 'unknown'
+                        logger.debug(f"跳过间接调用（allow_indirect=False）: {_field_name}")
+                        continue
 
-                if callee_entity and 'name' in callee_entity:
-                    result.append((callee_entity['name'], call_line, False))  # False 表示直接调用
+                    # tail 指向 FIELD 实体
+                    field_entity = self.entity_by_id.get(tail_id)
 
-            # ========== 间接调用（函数指针） ==========
-            elif call_type == 'indirect' and target_type == 'FIELD':
-                # 如果不允许间接调用，跳过
-                if not allow_indirect:
-                    # 提前获取 field_path 用于日志
-                    _field_path = rel.get('field_path', [])
-                    _field_name = _field_path[-1] if _field_path else 'unknown'
-                    logger.debug(f"跳过间接调用（allow_indirect=False）: {_field_name}")
+                    if not field_entity:
+                        logger.warning(f"间接调用的 FIELD 实体不存在: {tail_id}")
+                        continue
+
+                    # 获取字段名：优先使用 field_path 的最后一个元素
+                    field_path = rel.get('field_path', [])
+                    if field_path:
+                        field_name = field_path[-1]  # 使用路径的最后一个元素
+                    else:
+                        field_name = field_entity.get('name')  # fallback 到实体名称
+
+                    if not field_name:
+                        logger.warning(f"无法获取字段名: field_entity={field_entity}")
+                        continue
+
+                    logger.debug(f"检测到间接调用: field_name={field_name}, field_path={field_path}")
+
+                    # 查询 ASSIGNED_TO 关系
+                    candidate_functions = self.query_assigned_to_by_field_name(field_name)
+
+                    if candidate_functions:
+                        # 将所有候选函数加入结果（过度近似策略）
+                        for candidate_name in candidate_functions:
+                            add_result(candidate_name, call_line, True, None)  # 间接调用无精确 ID
+                    else:
+                        # 如果图谱中没有找到，fallback 到 Mock 数据
+                        logger.debug(f"图谱中未找到字段 '{field_name}' 的 ASSIGNED_TO，尝试 Mock 数据")
+                        # TODO: 这里可以添加 Mock fallback 逻辑
+
+        # 遍历 ioctl_call 关系（直接调用，格式简单，只有 head/tail）
+        # tail 可能是单个 ID 或 ID 列表
+        if not hasattr(self, 'ioctl_calls_by_head'):
+            self.ioctl_calls_by_head = {}
+        ioctl_calls_by_head = self.ioctl_calls_by_head
+        if not ioctl_calls_by_head and self.relations.get('ioctl_call'):
+            for rel in self.relations.get('ioctl_call', []):
+                head_id = rel.get('head')
+                if head_id:
+                    ioctl_calls_by_head.setdefault(head_id, []).append(rel)
+
+        for head_id in equivalent_ids:
+            for rel in ioctl_calls_by_head.get(head_id, []):
+                tail_raw = rel.get('tail')
+                tail_ids = tail_raw if isinstance(tail_raw, list) else [tail_raw]
+
+                for tail_id in tail_ids:
+                    callee_id_normalized = self.normalize_id(tail_id)
+                    callee_entity = self.entity_by_id.get(callee_id_normalized)
+
+                    if callee_entity and 'name' in callee_entity:
+                        add_result(callee_entity['name'], None, False, callee_id_normalized)  # ioctl_call 没有 call_line
+
+        self._callees_with_lines_cache[cache_key] = list(result)
+        return result
+
+    def _get_callers_with_lines(self, func_id: str) -> List[Tuple[str, Optional[int], bool, Optional[str]]]:
+        """
+        获取函数的调用者及调用行号（反向搜索使用）。
+
+        Returns:
+            [(caller_name, call_line, is_from_indirect, caller_id), ...]
+        """
+        func_id = self.normalize_id(str(func_id))
+        if not hasattr(self, '_callers_with_lines_cache'):
+            self._callers_with_lines_cache = {}
+        if func_id in self._callers_with_lines_cache:
+            return list(self._callers_with_lines_cache[func_id])
+
+        result = []
+        seen = set()
+
+        def add_result(caller_name, call_line, is_from_indirect, caller_id):
+            key = (caller_name, call_line, is_from_indirect, caller_id)
+            if key in seen:
+                return
+            seen.add(key)
+            result.append((caller_name, call_line, is_from_indirect, caller_id))
+
+        equivalent_ids = self.get_equivalent_ids(func_id)
+
+        if not hasattr(self, 'calls_by_tail'):
+            self.calls_by_tail = {}
+        calls_by_tail = self.calls_by_tail
+        if not calls_by_tail and self.relations.get('CALLS'):
+            for rel in self.relations.get('CALLS', []):
+                tail_raw = rel.get('tail')
+                tail_ids = tail_raw if isinstance(tail_raw, list) else [tail_raw]
+                for tail_id in tail_ids:
+                    if tail_id:
+                        calls_by_tail.setdefault(tail_id, []).append(rel)
+
+        for tail_id in equivalent_ids:
+            for rel in calls_by_tail.get(tail_id, []):
+                call_type = rel.get('call_type', 'direct')
+                target_type = rel.get('target_type', 'FUNCTION')
+                if call_type != 'direct' and target_type != 'FUNCTION':
                     continue
 
-                # tail 指向 FIELD 实体
-                field_entity = self.entity_by_id.get(tail_id)
-
-                if not field_entity:
-                    logger.warning(f"间接调用的 FIELD 实体不存在: {tail_id}")
+                head_id = rel.get('head')
+                if not head_id:
                     continue
+                caller_id_normalized = self.normalize_id(head_id)
+                caller_entity = self.entity_by_id.get(caller_id_normalized)
+                if caller_entity and 'name' in caller_entity:
+                    add_result(caller_entity['name'], rel.get('call_line'), False, caller_id_normalized)
 
-                # 获取字段名：优先使用 field_path 的最后一个元素
-                field_path = rel.get('field_path', [])
-                if field_path:
-                    field_name = field_path[-1]  # 使用路径的最后一个元素
-                else:
-                    field_name = field_entity.get('name')  # fallback 到实体名称
+        if not hasattr(self, 'ioctl_calls_by_tail'):
+            self.ioctl_calls_by_tail = {}
+        ioctl_calls_by_tail = self.ioctl_calls_by_tail
+        if not ioctl_calls_by_tail and self.relations.get('ioctl_call'):
+            for rel in self.relations.get('ioctl_call', []):
+                tail_raw = rel.get('tail')
+                tail_ids = tail_raw if isinstance(tail_raw, list) else [tail_raw]
+                for tail_id in tail_ids:
+                    if tail_id:
+                        ioctl_calls_by_tail.setdefault(tail_id, []).append(rel)
 
-                if not field_name:
-                    logger.warning(f"无法获取字段名: field_entity={field_entity}")
+        for tail_id in equivalent_ids:
+            for rel in ioctl_calls_by_tail.get(tail_id, []):
+                head_id = rel.get('head')
+                if not head_id:
                     continue
+                caller_id_normalized = self.normalize_id(head_id)
+                caller_entity = self.entity_by_id.get(caller_id_normalized)
+                if caller_entity and 'name' in caller_entity:
+                    add_result(caller_entity['name'], None, False, caller_id_normalized)
 
-                logger.debug(f"检测到间接调用: field_name={field_name}, field_path={field_path}")
-
-                # 查询 ASSIGNED_TO 关系
-                candidate_functions = self.query_assigned_to_by_field_name(field_name)
-
-                if candidate_functions:
-                    # 将所有候选函数加入结果（过度近似策略）
-                    for candidate_name in candidate_functions:
-                        result.append((candidate_name, call_line, True))  # True 表示间接调用
-                else:
-                    # 如果图谱中没有找到，fallback 到 Mock 数据
-                    logger.debug(f"图谱中未找到字段 '{field_name}' 的 ASSIGNED_TO，尝试 Mock 数据")
-                    # TODO: 这里可以添加 Mock fallback 逻辑
-
+        self._callers_with_lines_cache[func_id] = list(result)
         return result
 
     def find_reachable_from_start(self, start: str, max_depth: int = 10) -> Dict[str, List[str]]:
@@ -1816,9 +2390,13 @@ class KnowledgeGraphInterface:
             桥接信息，如果不存在返回None
         """
         # 首先尝试从真实图谱中查找
-        if 'ASSIGNED_TO' in self.relations:
-            # 查找 work_struct.func 指向 node_b 的关系
-            for rel in self.relations['ASSIGNED_TO']:
+        # 查找 work_struct.func 指向 node_b 的关系
+        field_to_func_relations = []
+        field_to_func_relations.extend(self.relations.get('ASSIGNED_TO', []))
+        field_to_func_relations.extend(self.relations.get('MOUNTED_TO', []))
+
+        if field_to_func_relations:
+            for rel in field_to_func_relations:
                 src = rel.get('source') or rel.get('from')
                 tgt = rel.get('target') or rel.get('to')
 
@@ -1830,15 +2408,7 @@ class KnowledgeGraphInterface:
                         'init_func': 'INIT_WORK/INIT_DELAYED_WORK'
                     }
 
-        # ============================================================
-        # TODO: 等图谱修复后删除这部分代码
-        # 作为临时方案，使用 mock 数据
-        # ============================================================
-        mock_bridge = get_mock_async_bridge(node_a, node_b)
-        if mock_bridge:
-            logger.debug(f"使用 mock 异步调用桥接: {node_a} -> {node_b}")
-            return mock_bridge
-
+        # 没有找到异步调用桥接
         return None
     
     def check_function_pointer_pattern(self, node_a: str, node_b: str) -> Optional[Dict]:
@@ -1853,9 +2423,13 @@ class KnowledgeGraphInterface:
             桥接信息，如果不存在返回None
         """
         # 首先尝试从真实图谱中查找
-        if 'ASSIGNED_TO' in self.relations:
-            # 查找 ops 相关的赋值
-            for rel in self.relations['ASSIGNED_TO']:
+        # 查找 ops 相关的赋值
+        field_to_func_relations = []
+        field_to_func_relations.extend(self.relations.get('ASSIGNED_TO', []))
+        field_to_func_relations.extend(self.relations.get('MOUNTED_TO', []))
+
+        if field_to_func_relations:
+            for rel in field_to_func_relations:
                 src = rel.get('source') or rel.get('from')
                 tgt = rel.get('target') or rel.get('to')
 
@@ -1867,15 +2441,7 @@ class KnowledgeGraphInterface:
                         'ops_var': src
                     }
 
-        # ============================================================
-        # TODO: 等图谱修复后删除这部分代码
-        # 作为临时方案，使用 mock 数据
-        # ============================================================
-        mock_bridge = get_mock_function_pointer_bridge(node_a, node_b)
-        if mock_bridge:
-            logger.debug(f"使用 mock 函数指针桥接: {node_a} -> {node_b}")
-            return mock_bridge
-
+        # 没有找到函数指针桥接
         return None
     
     # ============ 上下文查询 ============

@@ -11,6 +11,7 @@ from agents.chain_tracer_agent import CallChainTracerAgent
 from llm import LLMClient
 from utils.subgraph_selector import SubgraphSelector
 from config.subgraph_metadata import SUBGRAPH_METADATA
+from config.entry_points import get_candidate_entries_for_subgraph, suggest_entry_by_platform
 from utils.logger import logger, print_header, print_step, print_success, print_error, print_panel
 from rich.console import Console
 from rich.table import Table
@@ -28,7 +29,9 @@ class MasterCoordinator:
         enable_llm_detection: bool = False,
         enable_llm_log_analysis: bool = False,
         enable_subgraph_selection: bool = False,
-        llm_config: Optional[Dict] = None
+        llm_config: Optional[Dict] = None,
+        path_mappings: Optional[Dict] = None,
+        verbose: bool = False
     ):
         """
         初始化协调器
@@ -41,12 +44,16 @@ class MasterCoordinator:
             enable_subgraph_selection: 是否启用子图自动选择
             llm_config: LLM配置（如果需要自动创建LLM客户端）
                 例如: {'backend': 'openai', 'model': 'gpt-4o-mini', 'base_url': '...'}
+            path_mappings: 路径映射字典（可选）
+                例如: {"E:\\cpppro\\clang_kg\\linux": "/data/xuao/code_kg/data/linux_data"}
         """
         logger.info("初始化主协调器...")
 
         # 保存配置
         self.base_data_dir = data_dir
         self.enable_subgraph_selection = enable_subgraph_selection
+        self.path_mappings = path_mappings or {}
+        self.verbose = verbose
 
         # 如果需要LLM但没有提供客户端，则创建统一的LLM客户端
         if (enable_llm_detection or enable_llm_log_analysis or enable_subgraph_selection) and llm_client is None:
@@ -80,27 +87,30 @@ class MasterCoordinator:
             )
             logger.info(f"子图选择器已启用，发现 {len(self.subgraph_selector.available_subgraphs)} 个子图")
 
-        # 创建知识图谱接口（传入LLM客户端）
+        # 创建知识图谱接口（传入LLM客户端和路径映射）
         # 注意：如果启用子图选择，这里可能会在process时重新初始化
         self.kg = KnowledgeGraphInterface(
             data_dir,
             enable_llm_detection=enable_llm_detection,
-            llm_client=llm_client
+            llm_client=llm_client,
+            path_mappings=self.path_mappings
         )
 
         # 注意：不再需要LLM预处理，因为图谱中已经包含了间接调用结构（CALLS + ASSIGNED_TO）
         # LLM只在运行时用于分析delayed work的间接调用（_detect_async_call）
 
-        # 创建各个Agent（传入LLM客户端）
+        # 创建各个Agent（传入LLM客户端和KG接口）
         self.log_parser = LogParserAgent(
             enable_llm=enable_llm_log_analysis,
-            llm_client=llm_client
+            llm_client=llm_client,
+            kg_interface=self.kg
         )
         self.entity_locator = EntityLocatorAgent(self.kg)
         self.chain_tracer = CallChainTracerAgent(self.kg, llm_client)
 
-        # 保存enable_llm_detection以便重新初始化时使用
+        # 保存LLM配置以便重新初始化时使用
         self.enable_llm_detection = enable_llm_detection
+        self.enable_llm_log_analysis = enable_llm_log_analysis
 
         logger.success("协调器初始化完成")
     
@@ -134,12 +144,23 @@ class MasterCoordinator:
                     self.kg = KnowledgeGraphInterface(
                         str(subgraph_path),
                         enable_llm_detection=self.enable_llm_detection,
-                        llm_client=self.llm_client
+                        llm_client=self.llm_client,
+                        path_mappings=self.path_mappings
                     )
 
                     # 重新初始化依赖KG的Agent
                     self.entity_locator = EntityLocatorAgent(self.kg)
                     self.chain_tracer = CallChainTracerAgent(self.kg, self.llm_client)
+                    self.log_parser = LogParserAgent(
+                        enable_llm=self.enable_llm_log_analysis,
+                        llm_client=self.llm_client,
+                        kg_interface=self.kg
+                    )
+
+                    # DEBUG: 打印切换后的状态
+                    logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
 
                     print_success(f"已切换到子图: {selected_subgraph}")
                 else:
@@ -168,6 +189,16 @@ class MasterCoordinator:
                         # 重新初始化依赖KG的Agent
                         self.entity_locator = EntityLocatorAgent(self.kg)
                         self.chain_tracer = CallChainTracerAgent(self.kg, self.llm_client)
+                        self.log_parser = LogParserAgent(
+                            enable_llm=self.enable_llm_log_analysis,
+                            llm_client=self.llm_client,
+                            kg_interface=self.kg
+                        )
+
+                        # DEBUG: 打印切换后的状态
+                        logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
 
                         print_success(f"已切换到子图: {selected_subgraph}")
                     else:
@@ -181,11 +212,8 @@ class MasterCoordinator:
 
         # 第1步：日志解析
         print_step(1 + step_offset, total_steps, "解析错误日志")
-        # 检测是否是 MMC 日志
-        if 'mmc' in log_text.lower() or 'tuning' in log_text.lower():
-            parsed_log = self.log_parser.parse_mmc_log(log_text)
-        else:
-            parsed_log = self.log_parser.execute(log_text)
+        # 使用增强的日志解析（支持 FAIL_MESSAGE 匹配）
+        parsed_log = self.log_parser.parse_log(log_text)
         self._display_parsed_log(parsed_log)
 
         # 第2步：实体定位
@@ -304,31 +332,117 @@ class MasterCoordinator:
         if key_functions and key_functions != functions:
             table.add_row("关键函数", ", ".join(key_functions))
 
-        if 'inferred_entry' in parsed:
-            table.add_row("推断入口", parsed['inferred_entry'])
+        # 显示推断入口和置信度
+        if 'inferred_entry' in parsed and parsed['inferred_entry']:
+            entry_display = parsed['inferred_entry']
+            confidence = parsed.get('entry_confidence', 0.0)
+            if confidence > 0:
+                confidence_str = f"{confidence:.1%}"
+                # 根据置信度使用不同颜色
+                if confidence >= 0.6:
+                    entry_display = f"{entry_display} [green](置信度: {confidence_str})[/green]"
+                else:
+                    entry_display = f"{entry_display} [yellow](置信度: {confidence_str}, 降级模式)[/yellow]"
+            table.add_row("推断入口", entry_display)
+
         if 'inferred_error_point' in parsed:
             table.add_row("推断错误点", parsed['inferred_error_point'])
 
         console.print(table)
         console.print()
     
+    def _truncate_path(self, path: str, max_levels: int = 5) -> str:
+        """
+        截断文件路径，只保留最后几层
+
+        Args:
+            path: 完整路径
+            max_levels: 保留的层级数（默认5层，比如 .../drivers/mmc/core/core.c）
+
+        Returns:
+            截断后的路径
+        """
+        if not path or path == 'N/A':
+            return path
+
+        parts = path.replace('\\', '/').split('/')
+        if len(parts) <= max_levels:
+            return path
+
+        # 保留最后 max_levels 层，前面用 ... 表示
+        truncated = '.../' + '/'.join(parts[-max_levels:])
+        return truncated
+
     def _display_entities(self, entities: Dict):
         """显示实体定位结果"""
         table = Table(title="实体定位结果")
         table.add_column("实体", style="cyan")
         table.add_column("函数名", style="green")
-        table.add_column("文件", style="yellow")
-        
+        table.add_column("文件路径", style="yellow", overflow="fold")
+        table.add_column("数量", style="magenta")
+
+        # 显示起点
         if entities.get('start_entity'):
-            table.add_row("起点", 
-                         entities['start_entity']['name'],
-                         entities['start_entity'].get('file', 'N/A'))
-        
+            start_name = entities['start_entity']['name']
+            # 查询所有同名起点
+            all_start_ids = self.kg.func_name_to_ids.get(start_name, [])
+
+            if len(all_start_ids) > 1:
+                # 多个同名实体，显示所有（最多5个）
+                file_paths = []
+                for func_id in all_start_ids[:5]:
+                    entity = self.kg.entity_by_id.get(func_id)
+                    if entity:
+                        source_file = entity.get('source_file', entity.get('file', 'N/A'))
+                        truncated = self._truncate_path(source_file)
+                        file_paths.append(truncated)
+
+                files_display = '\n'.join(file_paths)
+                count_display = f"{len(all_start_ids)} 个同名"
+                if len(all_start_ids) > 5:
+                    files_display += f"\n... 还有 {len(all_start_ids) - 5} 个"
+
+                table.add_row("起点", start_name, files_display, count_display)
+            else:
+                # 单个实体
+                source_file = entities['start_entity'].get('file',
+                                entities['start_entity'].get('source_file', 'N/A'))
+                truncated = self._truncate_path(source_file)
+                table.add_row("起点", start_name, truncated, "1 个")
+
+        # 添加分隔行（起点和终点之间）
+        if entities.get('start_entity') and entities.get('end_entity'):
+            table.add_row("", "", "", "", end_section=True)  # 添加分隔线
+
+        # 显示终点
         if entities.get('end_entity'):
-            table.add_row("终点",
-                         entities['end_entity']['name'],
-                         entities['end_entity'].get('file', 'N/A'))
-        
+            end_name = entities['end_entity']['name']
+            # 查询所有同名终点
+            all_end_ids = self.kg.func_name_to_ids.get(end_name, [])
+
+            if len(all_end_ids) > 1:
+                # 多个同名实体，显示所有（最多5个）
+                file_paths = []
+                for func_id in all_end_ids[:5]:
+                    entity = self.kg.entity_by_id.get(func_id)
+                    if entity:
+                        source_file = entity.get('source_file', entity.get('file', 'N/A'))
+                        truncated = self._truncate_path(source_file)
+                        file_paths.append(truncated)
+
+                files_display = '\n'.join(file_paths)
+                count_display = f"{len(all_end_ids)} 个同名"
+                if len(all_end_ids) > 5:
+                    files_display += f"\n... 还有 {len(all_end_ids) - 5} 个"
+
+                table.add_row("终点", end_name, files_display, count_display)
+            else:
+                # 单个实体
+                source_file = entities['end_entity'].get('file',
+                                entities['end_entity'].get('source_file', 'N/A'))
+                truncated = self._truncate_path(source_file)
+                table.add_row("终点", end_name, truncated, "1 个")
+
         console.print(table)
         console.print()
     
@@ -421,16 +535,27 @@ class MasterCoordinator:
         log_text: str,
         k: int = 5,
         error_line: int = None,
-        subgraph_override: Optional[str] = None
+        subgraph_override: Optional[str] = None,
+        user_context: Optional[Dict] = None,
+        user_start_func: Optional[str] = None,
+        user_end_func: Optional[str] = None
     ) -> Dict:
         """
         处理错误日志，返回Top-K条调用链
+
+        支持三种模式：
+        1. 纯自动模式：只提供日志，自动推断起止点
+        2. 混合模式：提供日志 + 用户指定起止点，日志解析结果作为关键节点
+        3. 手动模式：只提供起止点（使用 process_top_k_with_specific_functions）
 
         Args:
             log_text: 错误日志文本
             k: 返回路径数量上限
             error_line: 已废弃（保留用于兼容性，不再用于剪枝）
             subgraph_override: 手动指定子图（可选），如果提供则跳过自动选择
+            user_context: 用户提供的上下文信息（可选），用于辅助入口选择
+            user_start_func: 用户指定的起点函数（可选），如果提供则覆盖日志推断结果
+            user_end_func: 用户指定的终点函数（可选），如果提供则覆盖日志推断结果
 
         Returns:
             包含多条路径的分析结果
@@ -455,12 +580,23 @@ class MasterCoordinator:
                     self.kg = KnowledgeGraphInterface(
                         str(subgraph_path),
                         enable_llm_detection=self.enable_llm_detection,
-                        llm_client=self.llm_client
+                        llm_client=self.llm_client,
+                        path_mappings=self.path_mappings
                     )
 
                     # 重新初始化依赖KG的Agent
                     self.entity_locator = EntityLocatorAgent(self.kg)
                     self.chain_tracer = CallChainTracerAgent(self.kg, self.llm_client)
+                    self.log_parser = LogParserAgent(
+                        enable_llm=self.enable_llm_log_analysis,
+                        llm_client=self.llm_client,
+                        kg_interface=self.kg
+                    )
+
+                    # DEBUG: 打印切换后的状态
+                    logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
 
                     print_success(f"已切换到子图: {selected_subgraph}")
                 else:
@@ -490,6 +626,16 @@ class MasterCoordinator:
                         # 重新初始化依赖KG的Agent
                         self.entity_locator = EntityLocatorAgent(self.kg)
                         self.chain_tracer = CallChainTracerAgent(self.kg, self.llm_client)
+                        self.log_parser = LogParserAgent(
+                            enable_llm=self.enable_llm_log_analysis,
+                            llm_client=self.llm_client,
+                            kg_interface=self.kg
+                        )
+
+                        # DEBUG: 打印切换后的状态
+                        logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
 
                         print_success(f"已切换到子图: {selected_subgraph}")
                     else:
@@ -501,11 +647,71 @@ class MasterCoordinator:
 
         # 第1步：日志解析
         print_step(1 + step_offset, total_steps, "解析错误日志")
-        if 'mmc' in log_text.lower() or 'tuning' in log_text.lower():
-            parsed_log = self.log_parser.parse_mmc_log(log_text)
-        else:
-            parsed_log = self.log_parser.execute(log_text)
+
+        # 获取候选入口函数（如果已选择子图）
+        candidate_entries = None
+        if selected_subgraph:
+            entry_config = get_candidate_entries_for_subgraph(selected_subgraph)
+            # 合并 ko_init 和 sdk_api
+            candidate_entries = entry_config.get('ko_init', []) + entry_config.get('sdk_api', [])
+            logger.info(f"为子图 '{selected_subgraph}' 加载了 {len(candidate_entries)} 个候选入口")
+
+        # 使用增强的日志解析（支持 FAIL_MESSAGE 匹配 + LLM 入口选择）
+        parsed_log = self.log_parser.parse_log(
+            log_text,
+            candidate_entries=candidate_entries,
+            user_context=user_context
+        )
+
         self._display_parsed_log(parsed_log)
+
+        # 检查是否需要更多信息（降级模式）
+        if parsed_log.get('need_more_info'):
+            console.print("\n[yellow]⚠️  需要更多信息才能确定完整调用链入口[/yellow]")
+            if parsed_log.get('fallback_mode'):
+                console.print(f"[dim]已启用降级模式：使用日志函数 '{parsed_log.get('inferred_entry')}' 作为起点[/dim]")
+            if parsed_log.get('suggestions'):
+                console.print("\n[cyan]💡 建议提供以下信息之一：[/cyan]")
+                for suggestion in parsed_log['suggestions'][:3]:
+                    console.print(f"   • {suggestion}")
+            console.print()
+
+        # 混合模式：如果用户提供了起止点，将日志解析结果作为关键节点
+        if user_start_func or user_end_func:
+            console.print("\n[cyan]🔄 混合模式：使用用户指定的起止点[/cyan]")
+
+            # 收集日志解析出的函数作为关键节点
+            intermediate_funcs_from_log = []
+
+            if user_start_func:
+                # 用户指定了起点，将日志推断的起点作为关键节点
+                if parsed_log.get('inferred_entry') and parsed_log['inferred_entry'] != user_start_func:
+                    intermediate_funcs_from_log.append(parsed_log['inferred_entry'])
+                    console.print(f"   • 起点: [bold]{user_start_func}[/bold] (用户指定)")
+                    console.print(f"   • 日志推断的起点 '{parsed_log['inferred_entry']}' 作为关键节点")
+                else:
+                    console.print(f"   • 起点: [bold]{user_start_func}[/bold] (用户指定)")
+                parsed_log['inferred_entry'] = user_start_func
+
+            if user_end_func:
+                # 用户指定了终点，将日志推断的终点作为关键节点
+                if parsed_log.get('inferred_error_point') and parsed_log['inferred_error_point'] != user_end_func:
+                    intermediate_funcs_from_log.append(parsed_log['inferred_error_point'])
+                    console.print(f"   • 终点: [bold]{user_end_func}[/bold] (用户指定)")
+                    console.print(f"   • 日志推断的终点 '{parsed_log['inferred_error_point']}' 作为关键节点")
+                else:
+                    console.print(f"   • 终点: [bold]{user_end_func}[/bold] (用户指定)")
+                parsed_log['inferred_error_point'] = user_end_func
+
+            # 标记为混合模式
+            parsed_log['mode'] = 'hybrid'
+            parsed_log['user_provided_start'] = user_start_func
+            parsed_log['user_provided_end'] = user_end_func
+            parsed_log['intermediate_from_log'] = intermediate_funcs_from_log
+
+            if intermediate_funcs_from_log:
+                console.print(f"   • 关键节点: {', '.join(intermediate_funcs_from_log)}")
+            console.print()
 
         # 第2步：实体定位
         print_step(2 + step_offset, total_steps, "在图谱中定位实体")
@@ -529,8 +735,64 @@ class MasterCoordinator:
             entities['end_entity'],
             intermediate_entities=entities.get('intermediate_entities', []),
             k=k,
-            error_line=error_line
+            error_line=error_line,
+            debug=self.verbose
         )
+
+        # 回退策略：处理同名函数多实例导致的定位歧义
+        # 场景：起点/终点函数名在图中有多个实体，默认定位到的实例无法连通
+        if not paths:
+            start_name = (
+                entities['start_entity'].get('name')
+                if entities.get('start_entity')
+                else parsed_log.get('inferred_entry')
+            )
+            end_name = (
+                entities['end_entity'].get('name')
+                if entities.get('end_entity')
+                else parsed_log.get('inferred_error_point')
+            )
+            start_candidates = self.kg.find_all_functions(start_name) if start_name else []
+            end_candidates = self.kg.find_all_functions(end_name) if end_name else []
+
+            # 仅在存在多候选时触发，避免额外开销
+            if len(start_candidates) > 1 or len(end_candidates) > 1:
+                logger.info(
+                    f"触发同名函数多实例回退搜索: start候选={len(start_candidates)}, "
+                    f"end候选={len(end_candidates)}"
+                )
+
+                # 如果只有一个候选，也统一纳入组合逻辑
+                if not start_candidates and entities.get('start_entity'):
+                    start_candidates = [entities['start_entity']]
+                if not end_candidates and entities.get('end_entity'):
+                    end_candidates = [entities['end_entity']]
+
+                for s in start_candidates:
+                    for e in end_candidates:
+                        if not s or not e:
+                            continue
+                        logger.info(
+                            f"尝试候选组合: {s.get('name')}[{s.get('id')}] -> "
+                            f"{e.get('name')}[{e.get('id')}]"
+                        )
+                        candidate_paths = self.chain_tracer.execute_top_k(
+                            s,
+                            e,
+                            intermediate_entities=entities.get('intermediate_entities', []),
+                            k=k,
+                            error_line=error_line,
+                            debug=self.verbose
+                        )
+                        if candidate_paths:
+                            entities['start_entity'] = s
+                            entities['end_entity'] = e
+                            paths = candidate_paths
+                            logger.info("同名函数回退搜索成功，已找到路径")
+                            break
+                    if paths:
+                        break
+
         self._display_multiple_chains(paths)
 
         # 第4步：生成报告
@@ -549,7 +811,8 @@ class MasterCoordinator:
         intermediate_funcs: list = None,
         k: int = 5,
         error_line: int = None,
-        subgraph_override: Optional[str] = None
+        subgraph_override: Optional[str] = None,
+        user_context: Optional[Dict] = None
     ) -> Dict:
         """
         使用指定的起点、终点和中间节点，返回Top-K条调用链
@@ -562,6 +825,7 @@ class MasterCoordinator:
             k: 返回路径数量上限
             error_line: 已废弃（保留用于兼容性，不再用于剪枝）
             subgraph_override: 手动指定子图（可选），如果提供则跳过自动选择
+            user_context: 用户提供的上下文信息（可选），保留用于接口一致性
 
         Returns:
             包含多条路径的分析结果
@@ -586,12 +850,23 @@ class MasterCoordinator:
                     self.kg = KnowledgeGraphInterface(
                         str(subgraph_path),
                         enable_llm_detection=self.enable_llm_detection,
-                        llm_client=self.llm_client
+                        llm_client=self.llm_client,
+                        path_mappings=self.path_mappings
                     )
 
                     # 重新初始化依赖KG的Agent
                     self.entity_locator = EntityLocatorAgent(self.kg)
                     self.chain_tracer = CallChainTracerAgent(self.kg, self.llm_client)
+                    self.log_parser = LogParserAgent(
+                        enable_llm=self.enable_llm_log_analysis,
+                        llm_client=self.llm_client,
+                        kg_interface=self.kg
+                    )
+
+                    # DEBUG: 打印切换后的状态
+                    logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                    logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
 
                     print_success(f"已切换到子图: {selected_subgraph}")
                 else:
@@ -625,6 +900,16 @@ class MasterCoordinator:
                         # 重新初始化依赖KG的Agent
                         self.entity_locator = EntityLocatorAgent(self.kg)
                         self.chain_tracer = CallChainTracerAgent(self.kg, self.llm_client)
+                        self.log_parser = LogParserAgent(
+                            enable_llm=self.enable_llm_log_analysis,
+                            llm_client=self.llm_client,
+                            kg_interface=self.kg
+                        )
+
+                        # DEBUG: 打印切换后的状态
+                        logger.info(f"[DEBUG] 切换子图后: self.kg 实例 ID = {id(self.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.log_parser.kg 实例 ID = {id(self.log_parser.kg)}")
+                        logger.info(f"[DEBUG] 切换子图后: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
 
                         print_success(f"已切换到子图: {selected_subgraph}")
                     else:
@@ -661,8 +946,50 @@ class MasterCoordinator:
             entities['end_entity'],
             intermediate_entities=entities.get('intermediate_entities', []),
             k=k,
-            error_line=error_line
+            error_line=error_line,
+            debug=self.verbose
         )
+
+        # 回退策略：处理同名函数多实例导致的定位歧义
+        if not paths:
+            start_candidates = self.kg.find_all_functions(start_func) if start_func else []
+            end_candidates = self.kg.find_all_functions(end_func) if end_func else []
+
+            if len(start_candidates) > 1 or len(end_candidates) > 1:
+                logger.info(
+                    f"[手动模式] 触发同名函数多实例回退搜索: start候选={len(start_candidates)}, "
+                    f"end候选={len(end_candidates)}"
+                )
+
+                if not start_candidates and entities.get('start_entity'):
+                    start_candidates = [entities['start_entity']]
+                if not end_candidates and entities.get('end_entity'):
+                    end_candidates = [entities['end_entity']]
+
+                for s in start_candidates:
+                    for e in end_candidates:
+                        if not s or not e:
+                            continue
+                        logger.info(
+                            f"[手动模式] 尝试候选组合: {s.get('name')}[{s.get('id')}] -> "
+                            f"{e.get('name')}[{e.get('id')}]"
+                        )
+                        candidate_paths = self.chain_tracer.execute_top_k(
+                            s,
+                            e,
+                            intermediate_entities=entities.get('intermediate_entities', []),
+                            k=k,
+                            error_line=error_line,
+                            debug=self.verbose
+                        )
+                        if candidate_paths:
+                            entities['start_entity'] = s
+                            entities['end_entity'] = e
+                            paths = candidate_paths
+                            logger.info("[手动模式] 同名函数回退搜索成功，已找到路径")
+                            break
+                    if paths:
+                        break
         self._display_multiple_chains(paths)
 
         # 生成报告
@@ -701,6 +1028,9 @@ class MasterCoordinator:
             title += ")"
             console.print(title)
 
+            # 获取节点详细信息（包含文件路径）
+            nodes_detailed = path_result.get('nodes_detailed', [])
+
             # 显示路径
             for i, func in enumerate(path):
                 # 检查是否是断点修复的位置
@@ -715,7 +1045,28 @@ class MasterCoordinator:
                 if 'call_lines' in path_result and i > 0:
                     call_line = path_result['call_lines'][i-1]
                     if call_line:
-                        call_line_info = f" [dim](line {call_line})[/dim]"
+                        call_line_info = f" [dim](call line {call_line})[/dim]"
+
+                # 获取文件路径信息
+                file_info = ""
+                if i < len(nodes_detailed):
+                    node_detail = nodes_detailed[i]
+                    if node_detail.get('exists') and node_detail.get('entities'):
+                        # 取第一个实体的文件路径（这是路径中使用的具体实体）
+                        entity = node_detail['entities'][0]
+                        source_file = entity.get('source_file', 'N/A')
+                        if source_file != 'N/A':
+                            truncated = self._truncate_path(source_file)
+                            file_info = f" [dim]@ {truncated}[/dim]"
+                        # 如果有多个同名实体，添加一个小标记（不显示数量，因为这条路径用的是确定的那个）
+                        if node_detail.get('count', 1) > 1:
+                            file_info += f" [dim]†[/dim]"  # † 符号表示有同名实体
+
+                        # 添加函数的真实行号范围
+                        start_line = entity.get('start_line')
+                        end_line = entity.get('end_line')
+                        if start_line and end_line:
+                            file_info += f" [dim][{start_line}-{end_line}][/dim]"
 
                 if is_bridge:
                     # 找到桥接类型
@@ -727,15 +1078,15 @@ class MasterCoordinator:
                             break
                     # 间接调用用黄色，如果同时是关键函数也标注
                     if is_key_function:
-                        console.print(f"  {i}. [yellow]{func}[/yellow] ({bridge_type}) [cyan]✓关键函数[/cyan]{call_line_info}")
+                        console.print(f"  {i}. [yellow]{func}[/yellow] ({bridge_type}) [cyan]✓关键函数[/cyan]{call_line_info}{file_info}")
                     else:
-                        console.print(f"  {i}. [yellow]{func}[/yellow] ({bridge_type}){call_line_info}")
+                        console.print(f"  {i}. [yellow]{func}[/yellow] ({bridge_type}){call_line_info}{file_info}")
                 else:
                     # 关键函数用青色高亮
                     if is_key_function:
-                        console.print(f"  {i}. [cyan]{func} ✓[/cyan]{call_line_info}")
+                        console.print(f"  {i}. [cyan]{func} ✓[/cyan]{call_line_info}{file_info}")
                     else:
-                        console.print(f"  {i}. {func}{call_line_info}")
+                        console.print(f"  {i}. {func}{call_line_info}{file_info}")
 
             # 显示未经过的关键函数
             if missed_key_functions:

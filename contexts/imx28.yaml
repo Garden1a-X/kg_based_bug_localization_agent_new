@@ -1,0 +1,31 @@
+# NXP i.MX28 平台用户上下文配置
+
+# 硬件平台信息
+platform: i.MX28
+vendor: NXP
+soc_model: i.MX28
+
+# 驱动信息
+driver_hint: mxs_mmc
+driver_name: mxs_mmc
+subsystem: mmc
+
+# 已知入口
+known_entry: mxs_mmc_probe
+
+# 描述信息
+description: |
+  NXP (Freescale) i.MX28 平台
+  使用 MXS MMC 控制器
+  驱动文件：drivers/mmc/host/mxs-mmc.c
+
+  特点：
+  - 采用 DMA 引擎进行数据传输
+  - SSP (Synchronous Serial Port) 接口
+  - 特殊的时钟控制
+
+# 排除信息
+exclude:
+  - dw_mci
+  - sdhci
+  - omap_hsmmc

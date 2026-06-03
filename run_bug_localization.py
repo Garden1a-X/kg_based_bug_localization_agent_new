@@ -28,6 +28,27 @@ sys.path.insert(0, str(project_root))
 from coordinator.master_coordinator import MasterCoordinator
 from utils.logger import setup_logger
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+
+def load_user_context(context_file: str) -> Optional[dict]:
+    """从文件加载用户上下文"""
+    if not yaml:
+        print("警告: 需要安装 PyYAML 才能使用用户上下文功能")
+        print("请运行: pip install pyyaml")
+        return None
+
+    if not os.path.exists(context_file):
+        raise FileNotFoundError(f"用户上下文文件不存在: {context_file}")
+
+    with open(context_file, 'r', encoding='utf-8') as f:
+        context = yaml.safe_load(f)
+
+    return context
+
 
 def parse_args():
     """解析命令行参数"""
@@ -52,10 +73,9 @@ def parse_args():
        --subgraph mmc \\
        --k 5
 
-3. 手动指定起止点（使用子图自动选择）：
+3. 手动指定起止点（使用子图自动选择，无需日志）：
    python run_bug_localization.py \\
        --data-dir /data/xuao/code_kg_search/linux_test/data \\
-       --log "mmc0: tuning execution failed: -1" \\
        --start-func dw_mci_pltfm_probe \\
        --end-func dw_mci_execute_tuning \\
        --intermediate-funcs mmc_attach_mmc mmc_execute_tuning \\
@@ -92,15 +112,15 @@ def parse_args():
         help='知识图谱数据目录路径（可以是父目录或特定子图目录）'
     )
 
-    # 日志输入（二选一）
-    log_group = parser.add_mutually_exclusive_group(required=True)
+    # 日志输入（二选一，手动模式下可选）
+    log_group = parser.add_mutually_exclusive_group(required=False)
     log_group.add_argument(
         '--log',
-        help='错误日志文本（直接输入）'
+        help='错误日志文本（自动推断模式必需，手动模式可选）'
     )
     log_group.add_argument(
         '--log-file',
-        help='错误日志文件路径'
+        help='错误日志文件路径（自动推断模式必需，手动模式可选）'
     )
 
     # 模式选择
@@ -158,6 +178,18 @@ def parse_args():
         default='http://10.12.208.86:8502',
         help='LLM服务地址（默认：http://10.12.208.86:8502）'
     )
+    parser.add_argument(
+        '--user-context',
+        help='用户上下文文件路径（YAML格式，提供平台、驱动等额外信息）'
+    )
+
+    # 路径映射
+    parser.add_argument(
+        '--path-mapping',
+        action='append',
+        help='路径映射规则，格式：旧路径:新路径（可多次指定）\n'
+             '例如：--path-mapping "E:\\\\cpppro\\\\clang_kg\\\\linux:/data/xuao/code_kg/data/linux_data"'
+    )
 
     # 输出配置
     parser.add_argument(
@@ -199,6 +231,32 @@ def create_coordinator(args) -> MasterCoordinator:
             'api_key': ''
         }
 
+    # 解析路径映射
+    path_mappings = {}
+    if args.path_mapping:
+        for mapping in args.path_mapping:
+            # 智能分割：处理 Windows 路径中的冒号（如 E:\path）
+            # 策略：从右向左查找冒号，如果冒号前面不是单个字母（Windows盘符），则作为分隔符
+            colon_index = -1
+            for i in range(len(mapping) - 1, -1, -1):
+                if mapping[i] == ':':
+                    # 检查是否是 Windows 盘符（前面只有一个字母或字母+反斜杠）
+                    if i == 1 or (i > 1 and mapping[i-2] in ['\\', '/']):
+                        # 这是 Windows 盘符，继续找前一个冒号
+                        continue
+                    else:
+                        # 这是分隔符
+                        colon_index = i
+                        break
+
+            if colon_index > 0:
+                old_path = mapping[:colon_index].strip()
+                new_path = mapping[colon_index+1:].strip()
+                path_mappings[old_path] = new_path
+                print(f"📍 路径映射: {old_path} -> {new_path}")
+            else:
+                print(f"⚠️  忽略无效的路径映射: {mapping}（格式应为 '旧路径:新路径'）")
+
     # 创建协调器
     coordinator = MasterCoordinator(
         data_dir=args.data_dir,
@@ -206,7 +264,9 @@ def create_coordinator(args) -> MasterCoordinator:
         enable_llm_detection=args.enable_llm_detection,
         enable_llm_log_analysis=args.enable_llm_log_analysis,
         enable_subgraph_selection=args.enable_subgraph_selection,
-        llm_config=llm_config
+        llm_config=llm_config,
+        path_mappings=path_mappings if path_mappings else None,
+        verbose=args.verbose
     )
 
     return coordinator
@@ -293,23 +353,45 @@ def main():
     args = parse_args()
 
     # 配置日志
-    setup_logger()
+    setup_logger(log_level="DEBUG" if args.verbose else "INFO")
 
     try:
-        # 加载日志
+        # 判断运行模式
+        is_manual_mode = args.start_func and args.end_func
+
+        # 验证参数
+        if not is_manual_mode and not args.log and not args.log_file:
+            print("❌ 错误: 自动推断模式必须提供日志（使用 --log 或 --log-file）")
+            print("提示: 如果要手动指定起止点，请使用 --start-func 和 --end-func 参数")
+            return 1
+
+        # 加载日志（手动模式下可选）
+        log_text = ""
         if args.log:
             log_text = args.log
-        else:
+        elif args.log_file:
             log_text = load_log_from_file(args.log_file)
 
+        # 加载用户上下文（可选）
+        user_context = None
+        if args.user_context:
+            user_context = load_user_context(args.user_context)
+            if user_context:
+                print(f"📌 用户上下文: {args.user_context}")
+
         print(f"📋 数据目录: {args.data_dir}")
-        print(f"📝 日志来源: {'命令行' if args.log else args.log_file}")
+        if log_text:
+            print(f"📝 日志来源: {'命令行' if args.log else args.log_file}")
+        else:
+            print(f"📝 日志来源: 无（手动模式）")
         print(f"🔢 Top-K: {args.k}")
         print(f"🎯 子图选择: {'✓ 启用' if args.enable_subgraph_selection else '✗ 禁用'}")
         if args.subgraph:
             print(f"📦 指定子图: {args.subgraph}")
         if args.enable_llm_detection:
             print(f"🤖 LLM检测: ✓ 启用")
+        if user_context:
+            print(f"🔍 用户上下文: ✓ 已提供")
         print()
 
         # 创建协调器
@@ -317,9 +399,9 @@ def main():
 
         try:
             # 判断模式并执行
-            if args.start_func and args.end_func:
-                # 手动指定模式
-                print(f"🎯 模式: 手动指定起止点")
+            if is_manual_mode and not log_text:
+                # 纯手动指定模式（无日志）
+                print(f"🎯 模式: 手动指定起止点（无日志）")
                 print(f"   起点: {args.start_func}")
                 print(f"   终点: {args.end_func}")
                 if args.intermediate_funcs:
@@ -332,7 +414,24 @@ def main():
                     end_func=args.end_func,
                     intermediate_funcs=args.intermediate_funcs,
                     k=args.k,
-                    subgraph_override=args.subgraph
+                    subgraph_override=args.subgraph,
+                    user_context=user_context
+                )
+            elif is_manual_mode and log_text:
+                # 混合模式（日志 + 用户指定起止点）
+                print(f"🔄 模式: 混合模式（日志 + 用户指定起止点）")
+                print(f"   用户指定起点: {args.start_func}")
+                print(f"   用户指定终点: {args.end_func}")
+                print(f"   日志解析结果将作为关键节点")
+                print()
+
+                result = coordinator.process_top_k(
+                    log_text,
+                    k=args.k,
+                    subgraph_override=args.subgraph,
+                    user_context=user_context,
+                    user_start_func=args.start_func,
+                    user_end_func=args.end_func
                 )
             else:
                 # 自动推断模式
@@ -342,7 +441,10 @@ def main():
                 result = coordinator.process_top_k(
                     log_text,
                     k=args.k,
-                    subgraph_override=args.subgraph
+                    subgraph_override=args.subgraph,
+                    user_context=user_context,
+                    user_start_func=args.start_func,
+                    user_end_func=args.end_func
                 )
 
             # 保存结果

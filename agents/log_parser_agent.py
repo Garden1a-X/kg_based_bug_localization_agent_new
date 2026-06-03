@@ -5,16 +5,113 @@
 import re
 from typing import Dict, List
 from agents.base_agent import BaseAgent
-from data.mock_indirect_calls import MOCK_FAIL_MESSAGES, _extract_message_pattern
+
+
+def _extract_message_pattern(fail_message_name: str) -> str:
+    """
+    从FAIL_MESSAGE的name字段提取用于日志匹配的模式
+
+    Args:
+        fail_message_name: FAIL_MESSAGE实体的name字段（如 'pr_err("xxx", ...)'）
+
+    Returns:
+        用于匹配的正则模式
+    """
+    # 提取引号内的字符串
+    # 匹配第一个双引号内的内容
+    string_match = re.search(r'"([^"]+)"', fail_message_name)
+    if not string_match:
+        return None
+
+    template = string_match.group(1)
+
+    # 将格式化占位符替换为通配符
+    # %s, %d, %u, %x 等 -> .*
+    pattern = re.sub(r'%[sduxXfgGp]', r'.*?', template)
+
+    # 转义特殊字符
+    pattern = re.escape(pattern)
+
+    # 还原通配符（之前被escape了）
+    pattern = pattern.replace(r'\.\*\?', '.*?')
+
+    # 移除换行符标记
+    pattern = pattern.replace(r'\\n', '')
+
+    return pattern
+
+
+def _calculate_pattern_quality(pattern: str, original_template: str) -> float:
+    """
+    计算模式的质量分数
+
+    高质量模式：包含具体关键词，如 "tuning execution failed"
+    低质量模式：只有通配符，如 ".*?-.*?" 或 ".*?"
+
+    Args:
+        pattern: 正则表达式模式
+        original_template: 原始模板字符串（替换占位符前）
+
+    Returns:
+        质量分数 (0.0 - 1.0)
+    """
+    if not pattern:
+        return 0.0
+
+    # 移除通配符，看剩下多少实际内容
+    pattern_without_wildcards = pattern.replace('.*?', '')
+
+    # 如果去掉通配符后什么都不剩，说明是纯通配符模式
+    if not pattern_without_wildcards or len(pattern_without_wildcards.strip()) == 0:
+        return 0.1  # 最低质量
+
+    # 计算实际关键词的长度
+    keyword_length = len(pattern_without_wildcards)
+    total_length = len(pattern)
+
+    # 关键词占比
+    keyword_ratio = keyword_length / total_length if total_length > 0 else 0
+
+    # 统计实际单词数量（连续的字母数字字符）
+    words = re.findall(r'[a-zA-Z0-9]{3,}', pattern_without_wildcards)  # 至少3个字符的单词
+    word_count = len(words)
+
+    # 基础分数：关键词占比
+    base_score = keyword_ratio
+
+    # 奖励：包含多个实际单词
+    word_bonus = min(word_count * 0.15, 0.5)  # 每个单词+0.15，最多+0.5
+
+    # 惩罚：如果模式太短（可能是过于简单的模式）
+    if keyword_length < 5:
+        length_penalty = 0.3
+    else:
+        length_penalty = 0.0
+
+    # 最终分数
+    quality_score = min(base_score + word_bonus - length_penalty, 1.0)
+    quality_score = max(quality_score, 0.1)  # 确保最低分为0.1
+
+    return quality_score
 
 
 class LogParserAgent(BaseAgent):
     """日志解析Agent - 基于FAIL_MESSAGE实体匹配"""
 
-    def __init__(self, enable_llm: bool = False, llm_client=None):
+    def __init__(self, enable_llm: bool = False, llm_client=None, kg_interface=None):
         super().__init__("LogParser")
         self.enable_llm = enable_llm
         self.llm_client = llm_client  # 统一的LLM客户端
+        self.kg = kg_interface  # 知识图谱接口（用于查询FAIL_MESSAGE）
+
+        # DEBUG: 打印初始化时的KG信息
+        if self.kg:
+            self.log_info(f"[DEBUG] LogParser 初始化: self.kg 实例 ID = {id(self.kg)}")
+            self.log_info(f"[DEBUG] LogParser 初始化: self.kg.entity_by_id 有 {len(self.kg.entity_by_id)} 个实体")
+            fail_msg_count = sum(1 for e in self.kg.entity_by_id.values() if e.get('type') == 'FAIL_MESSAGE')
+            self.log_info(f"[DEBUG] LogParser 初始化: 其中有 {fail_msg_count} 个 FAIL_MESSAGE 实体")
+        else:
+            self.log_warning(f"[DEBUG] LogParser 初始化: self.kg 为 None")
 
         # 定义常见的错误模式（保留用于fallback）
         self.error_patterns = {
@@ -90,6 +187,50 @@ class LogParserAgent(BaseAgent):
         lines = re.findall(r':(\d+):', log_text)
         return [int(l) for l in lines]
 
+    def _extract_function_names_from_log(self, log_text: str) -> list:
+        """
+        从日志文本中提取可能的函数名（补充FAIL_MESSAGE匹配）
+
+        提取策略：
+        1. 匹配看起来像函数名的词：[a-z_][a-z0-9_]+
+        2. 在图谱中验证是否存在
+        3. 过滤掉常见的非函数词（如 error, failed 等）
+
+        Args:
+            log_text: 日志文本
+
+        Returns:
+            在图谱中存在的函数名列表
+        """
+        if not self.kg:
+            return []
+
+        # 常见的非函数关键词（排除）
+        excluded_words = {
+            'error', 'failed', 'warning', 'info', 'debug', 'trace',
+            'mmc0', 'mmc1', 'mmc2', 'null', 'true', 'false',
+            'dev', 'host', 'card', 'bus', 'reg', 'data'
+        }
+
+        # 提取所有潜在的函数名（以小写字母或下划线开头）
+        potential_funcs = re.findall(r'\b[a-z_][a-z0-9_]{2,}\b', log_text.lower())
+
+        # 去重
+        potential_funcs = list(dict.fromkeys(potential_funcs))
+
+        # 在图谱中验证
+        verified_functions = []
+        for func_name in potential_funcs:
+            # 排除常见非函数词
+            if func_name in excluded_words:
+                continue
+
+            # 在图谱中查找（检查是否有这个名字的函数实体）
+            if func_name in self.kg.func_name_to_ids:
+                verified_functions.append(func_name)
+
+        return verified_functions
+
     def _match_log_line_to_fail_message(self, log_line: str, fail_messages: dict) -> list:
         """
         尝试将一行日志匹配到FAIL_MESSAGE实体
@@ -104,9 +245,22 @@ class LogParserAgent(BaseAgent):
         matches = []
 
         for msg_id, msg_data in fail_messages.items():
+            fail_message_name = msg_data.get('name', '')
+
             # 从name字段提取匹配模式
-            pattern = _extract_message_pattern(msg_data.get('name', ''))
+            pattern = _extract_message_pattern(fail_message_name)
             if not pattern:
+                continue
+
+            # 提取原始模板（用于计算质量）
+            template_match = re.search(r'"([^"]+)"', fail_message_name)
+            original_template = template_match.group(1) if template_match else ""
+
+            # 计算模式质量
+            pattern_quality = _calculate_pattern_quality(pattern, original_template)
+
+            # 如果模式质量太低，直接跳过
+            if pattern_quality < 0.2:
                 continue
 
             # 尝试匹配
@@ -114,8 +268,12 @@ class LogParserAgent(BaseAgent):
             if match_obj:
                 matched_text = match_obj.group(0)
 
-                # 计算相似度（匹配长度占日志行的比例）
-                similarity = len(matched_text) / len(log_line.strip()) if log_line.strip() else 0
+                # 计算匹配长度占比
+                length_ratio = len(matched_text) / len(log_line.strip()) if log_line.strip() else 0
+
+                # 综合相似度 = 匹配长度占比 * 模式质量
+                # 这样高质量的模式会得到更高的分数
+                similarity = length_ratio * pattern_quality
 
                 matches.append((msg_id, msg_data, matched_text, similarity))
 
@@ -142,8 +300,48 @@ class LogParserAgent(BaseAgent):
             'all_functions': []
         }
 
+        # 从图谱查询FAIL_MESSAGE实体（如果KG可用）
+        fail_messages = {}
+        if self.kg:
+            try:
+                # DEBUG: 打印KG实例信息
+                self.log_info(f"[DEBUG] self.kg 实例 ID: {id(self.kg)}")
+                self.log_info(f"[DEBUG] self.kg.entity_by_id 总共有 {len(self.kg.entity_by_id)} 个实体")
+
+                # 统计FAIL_MESSAGE数量
+                fail_msg_count = sum(1 for e in self.kg.entity_by_id.values() if e.get('type') == 'FAIL_MESSAGE')
+                self.log_info(f"[DEBUG] entity_by_id 中有 {fail_msg_count} 个 FAIL_MESSAGE 实体")
+
+                # 从图谱中查询所有FAIL_MESSAGE实体
+                # 遍历 entity_by_id，过滤出 type='FAIL_MESSAGE' 的实体
+                for entity_id, entity in self.kg.entity_by_id.items():
+                    if entity.get('type') == 'FAIL_MESSAGE':
+                        fail_messages[entity_id] = {
+                            'id': entity.get('id'),
+                            'name': entity.get('name'),
+                            'type': entity.get('type'),
+                            'scope': entity.get('scope'),
+                            'source_file': entity.get('source_file'),
+                            'start_line': entity.get('start_line')
+                        }
+
+                self.log_info(f"[DEBUG] 收集到 fail_messages 字典中的数量: {len(fail_messages)}")
+
+                if fail_messages:
+                    self.log_info(f"从图谱加载了 {len(fail_messages)} 个 FAIL_MESSAGE 实体")
+            except Exception as e:
+                self.log_warning(f"从图谱查询FAIL_MESSAGE失败: {e}")
+                import traceback
+                self.log_warning(f"[DEBUG] 异常堆栈: {traceback.format_exc()}")
+
+        # 如果图谱中没有FAIL_MESSAGE，使用基于正则的fallback
+        if not fail_messages:
+            self.log_warning("图谱中没有FAIL_MESSAGE实体，将使用正则表达式fallback")
+            # 返回简单的正则提取结果
+            return self._fallback_regex_parsing(log_text)
+
         for idx, line in enumerate(lines, 1):
-            matches = self._match_log_line_to_fail_message(line, MOCK_FAIL_MESSAGES)
+            matches = self._match_log_line_to_fail_message(line, fail_messages)
 
             if matches:
                 # 取最佳匹配（相似度最高）
@@ -177,20 +375,64 @@ class LogParserAgent(BaseAgent):
                 if func_name and func_name not in result['all_functions']:
                     result['all_functions'].append(func_name)
 
+        # 只有在没有任何 FAIL_MESSAGE 精确匹配时，才从自由文本里补充函数名。
+        # 已匹配到日志行时，文本提取容易把普通词（如 call）误当成关键函数。
+        if not result['line_matches']:
+            extracted_funcs = self._extract_function_names_from_log(log_text)
+            if extracted_funcs:
+                self.log_info(f"从日志文本中提取到 {len(extracted_funcs)} 个函数名: {extracted_funcs[:5]}...")
+                # 合并到结果中（去重）
+                for func in extracted_funcs:
+                    if func not in result['all_functions']:
+                        result['all_functions'].append(func)
+
         return result
 
-    def parse_mmc_log(self, log_text: str) -> Dict:
+    def _fallback_regex_parsing(self, log_text: str) -> dict:
         """
-        专门针对MMC日志的解析（甲方案例）
-        使用基于FAIL_MESSAGE实体的匹配方法
+        Fallback: 当图谱中没有FAIL_MESSAGE时，使用正则表达式解析
 
         Args:
-            log_text: MMC错误日志
+            log_text: 日志文本
 
         Returns:
-            解析结果，包含推断的起点和终点
+            基础解析结果
         """
-        self.log_start("解析MMC错误日志")
+        lines = [line.strip() for line in log_text.strip().split('\n') if line.strip()]
+
+        # 提取函数名
+        functions = []
+        for line in lines:
+            func_matches = re.findall(r'([a-zA-Z_][a-zA-Z0-9_]+)\s*\(', line)
+            functions.extend(func_matches)
+
+        functions = list(dict.fromkeys(functions))  # 去重并保持顺序
+
+        return {
+            'total_lines': len(lines),
+            'line_matches': [],  # 没有FAIL_MESSAGE匹配
+            'all_functions': functions
+        }
+
+    def parse_log(
+        self,
+        log_text: str,
+        candidate_entries: list = None,
+        user_context: dict = None
+    ) -> Dict:
+        """
+        解析错误日志（增强版）
+        使用基于FAIL_MESSAGE实体的匹配方法 + LLM入口选择
+
+        Args:
+            log_text: 错误日志文本
+            candidate_entries: 候选入口函数列表（可选）
+            user_context: 用户提供的上下文信息（可选）
+
+        Returns:
+            解析结果，包含推断的起点和终点、置信度等
+        """
+        self.log_start("解析错误日志")
 
         # 使用新的基于FAIL_MESSAGE的匹配方法
         matching_result = self._analyze_log_by_lines(log_text)
@@ -198,22 +440,26 @@ class LogParserAgent(BaseAgent):
         # 提取关键函数
         all_functions = matching_result.get('all_functions', [])
         matched_count = len(matching_result.get('line_matches', []))
+        has_precise_log_matches = matched_count > 0
 
         self.log_success(f"匹配到 {matched_count} 行日志")
         self.log_info(f"涉及函数: {all_functions}")
 
-        # 构建结果
+        # 构建基础结果
         result = {
             'raw_log': log_text,
             'line_matches': matching_result.get('line_matches', []),
             'functions': all_functions,  # 所有匹配到的函数
-            # 提取错误消息和错误码（使用原有的方法）
+            'has_precise_log_matches': has_precise_log_matches,
             'error_messages': self._extract_error_messages(log_text),
             'error_codes': self._extract_error_codes(log_text),
+            # 初始化入口相关字段（不设置默认值）
+            'inferred_entry': None,
+            'entry_confidence': 0.0,
+            'need_more_info': False,
+            'suggestions': [],
+            'llm_reasoning': []
         }
-
-        # Mock起始点（暂时固定为probe函数）
-        result['inferred_entry'] = 'dw_mci_pltfm_probe'
 
         # 推断错误点：取最底层的函数（日志的第一个匹配函数）
         if all_functions:
@@ -231,25 +477,90 @@ class LogParserAgent(BaseAgent):
             result['intermediate_functions'] = []
 
         # 如果启用了LLM，调用LLM进行增强分析
-        if self.enable_llm:
-            llm_result = self._analyze_with_llm(log_text, matching_result)
+        if self.enable_llm and self.llm_client:
+            llm_result = self._analyze_with_llm(
+                log_text,
+                matching_result,
+                candidate_entries=candidate_entries,
+                user_context=user_context
+            )
+
             if llm_result and not llm_result.get('error'):
-                # 使用LLM的结果覆盖推断
+                # 使用LLM的入口推断
+                if llm_result.get('start_entity'):
+                    result['inferred_entry'] = llm_result['start_entity']
+                    result['entry_confidence'] = llm_result.get('start_confidence', 0.5)
+
+                # 使用LLM的终点推断
                 if llm_result.get('end_entity'):
                     result['inferred_error_point'] = llm_result['end_entity']
+
+                # 中间节点
                 if llm_result.get('intermediate_entities'):
                     result['intermediate_functions'] = llm_result['intermediate_entities']
+
+                # 其他信息
+                result['need_more_info'] = llm_result.get('need_more_info', False)
+                result['suggestions'] = llm_result.get('suggestions', [])
+                result['llm_reasoning'] = llm_result.get('reasoning', [])
                 result['llm_analysis'] = llm_result
+
+        # 降级处理：如果LLM没有给出入口或置信度太低
+        if not result['inferred_entry'] or result['entry_confidence'] < 0.6:
+            # 如果已经通过 FAIL_MESSAGE 精确匹配到日志函数，不再把日志函数列表最后一个
+            # 当作自由文本降级入口。多条精准匹配日志本身有顺序含义：第一个作为
+            # 错误点，最后一个作为日志可见的最上游函数。
+            if has_precise_log_matches:
+                if len(all_functions) > 1:
+                    result['inferred_entry'] = all_functions[-1]
+                    result['entry_confidence'] = 0.6
+                    self.log_info(f"使用精准匹配日志序列推断入口: {result['inferred_entry']}")
+                else:
+                    result['inferred_entry'] = None
+                    result['entry_confidence'] = 0.0
+                    self.log_info("仅匹配到单个FAIL_MESSAGE函数，跳过入口推断")
+                result['need_more_info'] = False
+                result['fallback_mode'] = False
+            # 使用日志中最上层的函数作为降级入口
+            elif all_functions:
+                result['inferred_entry'] = all_functions[-1]  # 日志函数列表最后一个
+                result['entry_confidence'] = 0.3  # 标记为低置信度
+                result['need_more_info'] = True
+                result['fallback_mode'] = True  # 标记为降级模式
+
+                if not result['suggestions']:
+                    result['suggestions'] = [
+                        "硬件平台信息（如 RK3288, i.MX28, Renesas 等）",
+                        "驱动类型提示（如 dw_mci, mxs_mmc, sdhci 等）",
+                        "完整的 dmesg 日志（包含驱动加载信息）",
+                        "设备树信息或内核配置"
+                    ]
+
+                self.log_warning(f"⚠️ 无法确定完整入口，使用降级模式：{result['inferred_entry']} (日志最上层函数)")
+                self.log_info(f"💡 建议提供: {', '.join(result['suggestions'][:2])}")
+            else:
+                # 连日志函数都没有，无法分析
+                result['need_more_info'] = True
+                result['suggestions'] = ["无法从日志中提取函数信息，请提供更详细的错误日志"]
+                self.log_error("❌ 无法从日志中提取任何函数信息")
 
         return result
 
-    def _analyze_with_llm(self, log_text: str, matching_result: dict) -> dict:
+    def _analyze_with_llm(
+        self,
+        log_text: str,
+        matching_result: dict,
+        candidate_entries: list = None,
+        user_context: dict = None
+    ) -> dict:
         """
         使用LLM分析日志（可选）
 
         Args:
             log_text: 完整日志文本
             matching_result: 模式匹配结果
+            candidate_entries: 候选入口函数列表（可选）
+            user_context: 用户提供的上下文信息（可选）
 
         Returns:
             LLM分析结果
@@ -261,14 +572,26 @@ class LogParserAgent(BaseAgent):
 
         try:
             # 使用 llm_client 的 analyze_log 方法
-            llm_result = self.llm_client.analyze_log(log_text)
+            llm_result = self.llm_client.analyze_log(
+                log_text,
+                candidate_entries=candidate_entries,
+                user_context=user_context
+            )
 
             if not llm_result:
                 return {"error": "LLM返回空结果"}
 
-            # 如果LLM没有返回 intermediate_entities，添加空列表
+            # 如果LLM没有返回某些字段，添加默认值
             if 'intermediate_entities' not in llm_result:
                 llm_result['intermediate_entities'] = []
+            if 'start_confidence' not in llm_result:
+                llm_result['start_confidence'] = 0.5
+            if 'need_more_info' not in llm_result:
+                llm_result['need_more_info'] = False
+            if 'suggestions' not in llm_result:
+                llm_result['suggestions'] = []
+            if 'reasoning' not in llm_result:
+                llm_result['reasoning'] = []
 
             return llm_result
 

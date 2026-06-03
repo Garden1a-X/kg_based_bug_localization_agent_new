@@ -219,41 +219,139 @@ class LLMClient:
 
     def analyze_log(
         self,
-        log_text: str
+        log_text: str,
+        candidate_entries: list = None,
+        user_context: dict = None
     ) -> Optional[Dict[str, Any]]:
         """
         分析错误日志，提取结构化信息
 
         Args:
             log_text: 错误日志文本
+            candidate_entries: 候选入口函数列表（可选）
+            user_context: 用户提供的上下文信息（可选），如 {'platform': 'rk3288', 'driver': 'dw_mci'}
 
         Returns:
-            结构化的分析结果
+            结构化的分析结果，包含置信度
         """
         if not self.is_available():
             return None
 
-        prompt = f"""你是一个Linux内核驱动错误分析专家。请分析以下错误日志：
+        # 构建候选入口部分
+        candidates_section = ""
+        if candidate_entries:
+            candidates_section = f"""
+## 候选入口函数
+以下是可能的驱动入口函数（probe/init函数）：
+{json.dumps(candidate_entries, indent=2, ensure_ascii=False)}
+
+请从候选列表中选择最合适的入口函数。如果日志信息不足以确定具体是哪个驱动，请：
+- 设置 start_confidence < 0.6
+- 在 suggestions 中列出需要的额外信息
+"""
+        else:
+            candidates_section = """
+## 入口函数推断
+没有提供候选入口列表，请根据日志内容推断最可能的驱动入口函数（通常是 *_probe, *_init 等）。
+如果无法确定，设置 start_confidence < 0.6 并说明原因。
+"""
+
+        # 用户上下文
+        context_section = ""
+        if user_context:
+            context_section = f"""
+## 用户提供的额外信息
+{json.dumps(user_context, indent=2, ensure_ascii=False)}
+请结合这些信息进行分析。
+"""
+            logger.debug(f"用户上下文已添加到 prompt: {user_context}")
+        else:
+            logger.debug("未提供用户上下文")
+
+        prompt = f"""你是一个Linux内核驱动错误分析专家。请分析以下错误日志并选择最合适的入口函数。
+
+**重要原则：保守评估，宁可置信度低也不要过度自信。只有在有明确证据时才给出高置信度。**
+
+{candidates_section}
+{context_section}
 
 ## 错误日志
 {log_text}
 
 ## 分析任务
-1. 识别错误类型和错误码
-2. 找出调用链的起点函数（通常是驱动初始化、probe等）
-3. 找出错误点函数（实际报错的位置）
-4. 列出可能涉及的中间函数
+**你只需要推断调用链的起点函数（入口函数），不需要推断终点或中间函数。**
+
+1. 识别错误类型和错误码（如果有）
+2. 判断这是初始化错误还是运行时错误
+3. **仔细检查日志中是否有明确的驱动类型线索**（如驱动名、特定函数名等）
+4. **根据候选列表和用户上下文，选择最合适的起点函数**
+
+## 入口选择和置信度评估（非常重要！）
+
+**置信度评估规则：**
+
+**高置信度 (>= 0.6) - 满足以下任一条件即可：**
+1. ✅ **用户明确提供了平台和驱动信息**（如 platform: RK3288, driver_hint: dw_mci）
+   - **重要：用户提供的上下文是可靠证据，应该优先信任！**
+   - 即使日志中没有明确提到驱动名，用户上下文也足以作为判断依据
+   - 如果有 known_entry 字段，应优先使用该入口
+2. ✅ 日志中明确提到了驱动名称（如 "dw_mci", "sdhci"）
+3. ✅ 日志中包含该驱动的特有函数名（如 "dw_mci_execute_tuning"）
+
+**中等置信度 (0.4-0.6)：**
+1. 有用户上下文，但信息不完整（如只有 platform 没有 driver_hint）
+2. 候选列表中有多个驱动都可能匹配，需要更多信息区分
+
+**低置信度 (< 0.4) - 仅当以下情况：**
+1. ❌ 日志仅提到通用的子系统名（如 "mmc"），**且无用户上下文**
+2. ❌ 日志信息过于简单，**且无用户上下文**
+
+**置信度标准：**
+- **0.75-1.0**: 日志中明确驱动名 或 用户提供完整上下文（platform + driver_hint + known_entry）
+- **0.6-0.75**: 用户提供平台和驱动提示（platform + driver_hint）
+- **0.4-0.6**: 只有部分信息（仅 platform 或仅 driver_hint）
+- **0.0-0.4**: 无用户上下文，无法从日志判断
+
+**示例（重要！）：**
+- 日志："mmc0: tuning failed" + 用户上下文 {{platform: "RK3288", driver_hint: "dw_mci", known_entry: "dw_mci_rockchip_probe"}}
+  → confidence=**0.8**，start_entity="dw_mci_rockchip_probe"，need_more_info=false
+  → 理由：用户明确提供了平台、驱动和入口信息，应该信任用户提供的信息
+- 日志："mmc0: tuning failed" + 用户上下文 {{platform: "RK3288", driver_hint: "dw_mci"}}
+  → confidence=**0.7**，start_entity="dw_mci_rockchip_probe"（从候选中选择匹配的），need_more_info=false
+- 日志："mmc0: tuning failed" + 无用户上下文 + 多个候选
+  → confidence=0.3，start_entity=null，need_more_info=true
+- 日志："dw_mci: tuning failed"
+  → confidence=0.9
 
 ## 输出格式
-返回JSON格式（不要其他说明）：
+返回JSON格式（不要其他说明），**只需要返回起点相关信息**：
 {{
-  "error_type": "错误类型描述",
-  "error_code": 错误码（数字），
-  "start_entity": "起点函数名",
-  "end_entity": "错误点函数名",
-  "intermediate_entities": ["中间函数1", "中间函数2"]
+  "error_type": "错误类型描述（如有）",
+  "error_code": 错误码（数字，如果日志中有的话，否则为 null）,
+  "start_entity": "起点函数名或null",
+  "start_confidence": 0.7,
+  "reasoning": [
+    "推理步骤1：检查用户上下文 - 用户提供了 platform: RK3288, driver_hint: dw_mci",
+    "推理步骤2：检查候选列表 - 包含 dw_mci_rockchip_probe",
+    "推理步骤3：结论 - 用户上下文可靠，选择 dw_mci_rockchip_probe，confidence=0.7"
+  ],
+  "need_more_info": false,
+  "suggestions": []
 }}
+
+**重要说明：**
+- **不要尝试推断 end_entity 或 intermediate_entities**，这些信息会从日志中提取
+- 如果用户提供了 known_entry，优先使用该值作为 start_entity
+- 如果无法确定入口，start_entity 设为 null，start_confidence < 0.6，need_more_info=true
+- suggestions 只在 need_more_info=true 时才需要提供
 """
+
+        # DEBUG: 保存 prompt 用于调试
+        import os
+        if os.environ.get('LLM_DEBUG_PROMPT'):
+            with open('/tmp/llm_prompt_debug.txt', 'w', encoding='utf-8') as f:
+                f.write(prompt)
+            logger.info("已将 prompt 保存到 /tmp/llm_prompt_debug.txt")
 
         try:
             response = self.complete(
